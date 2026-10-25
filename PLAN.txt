@@ -1,0 +1,275 @@
+# Task: Port pi-sandbox + pi-bg-tasks to PiG as ONE Go extension with sandboxed background bash
+
+## Context
+
+Port two Pi extensions (both MIT) to PiG, the Go implementation of Pi (https://pi-in-go.dev), as a single
+combined Go extension using the PiG extension SDK (`github.com/MichaelKinsy/PiG/extensions/sdk`; scaffold
+with `pig extension init ./pi-sandbox --lang go`).
+
+- **Sandbox reference:** https://github.com/yandy/pi-packages/tree/main/pi-sandbox
+  (npm `@yandy0725/pi-sandbox`). Behavior, UX, config semantics, escalation flow.
+- **Background-tasks reference:** https://github.com/cyzlmh/pi-extensions/tree/main/pi-bg-tasks
+  (npm `pi-bg-tasks`, forked from pi-patty-bg-tasks). Scheduling, registry, lifecycle, notifications.
+- Read both repos' READMEs and sources first. Pi remains the reference for extension API semantics —
+  mirror Pi behavior where PiG's SDK exposes the equivalent hook; document every divergence.
+
+**Status of the Windows design:** Part 2's Windows runner is **spike-validated** on this machine
+(Windows 11 build 26300, Git for Windows 2.56 / msys-2.0 3.6.x). Every claim marked `[validated]` below
+was observed empirically, not reasoned. Evidence: `pig-tmp/win-sandbox-spike/` (probe16–probe23-v5,
+FINDINGS.md, `probe23-run.log`).
+
+**Scope — bash only.** The write/edit tools are handled by a separate permission-system extension
+(pi-permission-system); the model is ALLOWED to modify files outside the workspace via write/edit. This
+extension confines ONLY bash execution. Do not intercept, shadow, or gate write/edit.
+
+**Why one extension:** both packages override/shadow the built-in `bash` tool. Loading them separately
+leaves composition to tool-shadowing order, which is fragile and host-dependent. Build a single extension
+with two internal layers and one `bash` tool definition composed from both:
+- **bg layer** (scheduling, background registry, lifecycle, notifications, keybindings)
+- **sandbox layer** (policy, config, platform runners, escalation, denial classification)
+
+The bg layer owns WHEN and HOW commands are scheduled; the sandbox layer owns HOW commands are confined.
+Every spawn path — foreground, auto-backgrounded, manually backgrounded — goes through the sandbox runner.
+A background task is confined exactly like a foreground one; there is no unconfined spawn path except the
+explicit `danger-full-access` mode.
+
+**Goal of the sandbox:** stop a coding model from *unintentionally* deleting or modifying files via bash
+outside the working directory (fat-finger protection). Assume the model is NOT malicious; do not attempt
+malicious-actor-grade isolation.
+
+## Part 1 — Sandbox behavior (parity with the pi-sandbox reference unless stated)
+
+1. **Three permission modes**, process-wide, switchable at runtime: `read-only`, `workspace-write`
+   (default), `danger-full-access`. Expose `/permission [mode]` showing mode, runner, workspace, active
+   extra-writable dirs.
+2. **Shadow the built-in `bash` tool.** In every mode except `danger-full-access`, bash commands run
+   through the platform runner. Fail-closed: runner construction failure or grant failure ⇒ command
+   REFUSED, never run bare.
+3. **Escalation flow (bash only):** the bash tool accepts optional `sandbox_permissions`
+   (`workspace-write`|`danger-full-access`) + `justification`. Denial-first: honored only if this session
+   has a real sandbox denial from bash; each denial arms exactly one escalation retry; prompt defaults to
+   Deny; refuse when there is no approval channel (headless / subagent without parent UI).
+4. **Config:** read only the global `~/.pi/agent/sandbox.json`; ignore project-level `.pi/sandbox.json`
+   silently. Fields: `mode` (default `workspace-write`), `extraWritableDirs` (absolute paths; warn but
+   keep dangerous entries — home dir, `~/.pi`, ancestors of the agent dir; never silently grant PATH
+   dirs), `probeTimeoutMs` (default 5000). Corrupt/missing file ⇒ defaults.
+5. **Denial classification:** parse bash child stderr (English only) for sandbox denials; annotate results
+   with `[sandbox: …]`; arm escalation. Known markers `[validated]` on Windows: `Access is denied.`
+   (cmd/PowerShell), `Permission denied` (MSYS/bash), `Operation not permitted`, cygwin init failures
+   (`fatal error -`, `Win32 error 5`, `couldn't create signal pipe`, `CreateFileMapping`,
+   `NtCreateDirectoryObject`), bash temp-file errors. A missing marker is a classification gap, not a
+   confinement failure — document it.
+6. **No network isolation.** Network always allowed. Do not port any proxy, `--unshare-net`,
+   domain-filtering, WFP, or credential-masking machinery.
+
+## Part 2 — Platform runners
+
+- **Linux:** bubblewrap `--ro-bind / /` + rw `--bind` of workspace and host `/tmp`; Landlock fallback with
+  the same policy (`/` read-only, workspace + `/tmp` writable), reported "partial" on old kernels.
+  Confined processes get `LC_MESSAGES=C` and their own process group.
+- **macOS:** `sandbox-exec` with generated SBPL: deny `file-write*` with exceptions for workspace, `/tmp`,
+  `os.tmpdir()`, extraWritableDirs. Handle the `::ffff:127.0.0.1` localhost quirk.
+- **Windows — WSL note `[validated]`:** running the Linux/bubblewrap runner inside WSL works end-to-end
+  (bwrap 0.9.0 on Ubuntu 24.04: ro root, workspace bound over itself, `--unshare-net/--unshare-pid`,
+  escape writes denied, ~150 ms warm, `CREATE_NO_WINDOW` = no visible window, killing `wsl.exe`
+  propagates to the guest). It is NOT the primary runner here because Windows `.exe` children launched
+  from inside WSL execute **outside** the Linux namespaces (unconfined) and Linux tooling must be
+  installed in the distro. Keep it as an optional `runner: wsl-bwrap` for strict-Linux workloads only.
+
+### Windows primary runner — confined Git Bash (spike-validated recipe)
+
+Intentional divergence from the reference (PowerShell-only, refuses `bash` in confined modes): we make
+**confined Git Bash work, spawning native Windows children**, in pure Go (`golang.org/x/sys/windows` +
+`syscall.NewLazyDLL("ntdll.dll")`). No CGO.
+
+a. **Token `[validated]`:** `CreateRestrictedToken(hProc,
+   DISABLE_MAX_PRIVILEGE|WRITE_RESTRICTED /* 0x1|0x8 */, …)`. The WRITE_RESTRICTED flag is passed
+   **directly as a CreateRestrictedToken flag** — there is no `TokenFlags` info class for
+   `NtSetInformationToken` (the old plan's mechanism does not exist). Restricting SIDs, all four
+   required:
+   - `S-1-5-80-<random>` — app-private per-spawn SID. (Authority-15 `S-1-15-3-*` package/capability
+     classes are rejected with `ERROR_INVALID_PARAMETER` on this OS build — use 80.)
+   - `S-1-5-32-544` (Administrators), `S-1-5-18` (SYSTEM), `S-1-1-0` (Everyone).
+   Each SID unblocks a concrete wall `[validated]` (see experiment table below): Admins/SYSTEM cover the
+   native-tool init writes and CLR startup; **Everyone is required for cygwin's signal pipe** at
+   `\Device\NamedPipe` root. Sub-lists fail: `{priv}` and `{priv,Admins}` and `{priv,SYSTEM}` all die at
+   `couldn't create signal pipe, Win32 error 5` or `0xC0000142`.
+   A **plain-restricted token without WRITE_RESTRICTED (flags=0x1)** makes *everything* fail with
+   `0xC0000142` — dead configuration, do not ship.
+
+b. **Grants `[validated]`:** full control (`FILE_ALL_ACCESS = 0x001F01FF` — pass-2 checks the whole
+   mask; FILE_GENERIC unions are insufficient) for the private SID, with `(OI)(CI)` inheritance, on:
+   workspace, host `%TEMP%`, valid extraWritableDirs. Workspace first gets inheritance stripped
+   (`icacls <dir> /inheritance:r`) so the profile's inherited ACEs (including the everyone-list effects)
+   do not apply, then user + private-SID grants are added. Un-grantable directory (no WRITE_DAC) ⇒
+   fail closed. Do not rewrite TMP/TEMP.
+   **NEVER set an inheritable ACE on `%USERPROFILE%` (or any large tree):** `SetNamedSecurityInfo`
+   synchronously enumerates and rewrites ACLs across the entire subtree — this was measured (527 s CPU,
+   multi-minute wedge, large NTFS/journal writes amplified by SearchIndexer). A deny-ACE-on-profile
+   confinement design was therefore **rejected**; see the gap options below. Cleanup routines must obey
+   the same rule (the original spike's cleanup re-triggered the walk).
+
+c. **CRITICAL — Default DACL `[validated]`:** set `TokenDefaultDacl` (info class 6) to
+   `{Everyone GA, private-SID GA, Administrators GA}` (small ACL, ~512 B). Objects the child creates with
+   NULL security (cygwin shared sections, events) inherit this DACL, so the restricted write check passes
+   via the private SID. **This replaces the old section-pinning scaffolding entirely — no parent pinning
+   of `shared.N`/`<sid>.1` is needed.** Capability-only default DACLs are still wrong (pass-1 visibility).
+
+d. **MSYS object dir bootstrap `[validated]`:** the child's `NtCreateDirectoryObject` at
+   `\BaseNamedObjects` root fails `0xC0000022` (root grants no create/traverse to the restricting list).
+   The unconstrained parent must pre-create and **hold** the deterministic dir
+   `\BaseNamedObjects\msys-2.0S5-<shared_id>` (on this install: `msys-2.0S5-1888ae32e00d56aa`;
+   implementation: discover dynamically by scanning `\BaseNamedObjects` for the `msys-2.0S5-` prefix, the
+   name changes with the msys runtime version):
+   - `NtCreateDirectoryObject` with `OBJ_CASE_INSENSITIVE|OBJ_OPENIF` (0x40|0x200), desired access
+     `0x001F000F`; on `0xC0000035` fall back to `NtOpenDirectoryObject` (owner-implicit
+     `READ_CONTROL|WRITE_DAC` = 0x60000 if a full-access open is denied);
+   - `NtSetSecurityObject(DACL_SECURITY_INFORMATION=4)` with DACL
+     `{user, private-SID, Administrators, SYSTEM}` full control `(OI)(CI)` so both access passes pass;
+   - hold the handle for the whole run (the dir is transient — last holder exit deletes it), then
+     `NtMakeTemporaryObject` + close at cleanup.
+   Session subdirectory and child objects are created under this dir handle, so this one DACL covers them.
+
+e. **Shell spawn `[validated]`:** duplicate first — `DuplicateTokenEx(restricted, MAXIMUM_ALLOWED, …)`
+   to a primary token (the restricted handle lacks `TOKEN_ASSIGN_PRIMARY` → `CreateProcessAsUser`
+   returns 5 without it), then `CreateProcessAsUserW` with `CREATE_UNICODE_ENVIRONMENT |
+   CREATE_NO_WINDOW (0x800000)`, stdio pipes, `LC_MESSAGES=C`. `CREATE_NO_WINDOW` guarantees no console
+   flash even when the host has no console (when the host *does* have a terminal, the child attaches to
+   it — also no window). Resolve shell like Pi: `shellPath` setting, else `bash.exe` on PATH.
+   **MSYS argument conversion:** when bash builds command lines, Win32-style flags need the doubled-slash
+   form (`cmd.exe //c echo hi`, not `/c`) — single-slash POSIX-looking args get rewritten to paths.
+   **PowerShell also runs under this token `[validated]`** (`-NoProfile -NonInteractive` → `ps-ok`);
+   keep Git Bash primary, PowerShell as a supported secondary shell (the reference is PS-only).
+
+f. **Tree management:** assign each confined spawn to a **Job object with KILL_ON_JOB_CLOSE** so
+   bg_stop / Esc / session_shutdown reliably kill the whole tree. Empirical justification: orphaned
+   grandchildren were observed holding inherited stdio pipe write-ends open long after the parent died,
+   which stalled a reading pipeline indefinitely (`timeout` had already exited; only SIGKILL freed it).
+   Job objects also make `bg_output` EOF deterministic. Never rely on direct-child TerminateProcess alone.
+
+g. **Honest docs:** enforcement is `partial` — reads unconfined (by design); NTFS hard-link aliasing;
+   `NUL`/`\\.\NUL` writable via the device; grants persist after exit (inert in `read-only` because the
+   private SID is random per spawn — grants from other runs can never match).
+   **Known gap — profile tree is writable:** home's DACL `{user F, SYSTEM F, Administrators F}` matches
+   the restricting list, so the entire profile (incl. `%LOCALAPPDATA%`, `touch ../x` when workspace is
+   under home) is writable under `workspace-write`. Demonstrated, not hidden. Options, pick one before
+   ship: (i) accept for the non-malicious threat model; (ii) one-time supervised deny-ACE walk at setup
+   (correct but heavy — full-profile ACL propagation, opt-in flag); (iii) place the workspace **outside**
+   the profile and drop profile-wide exposure; (iv) command-layer path policy in the sandbox layer.
+   Locations whose DACL grants write only via the raw user SID or the `Users` group (no
+   priv/Admins/SYSTEM/Everyone trustee) ARE denied `[validated]` (A/B: bare spawn writes the test dir,
+   confined spawn gets `Access is denied.` and creates no file — same result from inside confined bash).
+   Everyone-in-list also opens Everyone-writable locations (e.g. `C:\Users\Public`) — accepted.
+
+### Windows restricting-list experiment table `[validated]`
+
+| Restrict list (flags=0x9) | native tools (cmd/where/whoami/git/node) | signal pipe | PowerShell (CLR) | Git Bash |
+|---|---|---|---|---|
+| `{priv}` | ❌ `0xC0000142` | ❌ | ❌ | ❌ |
+| `{priv, Admins}` | ✅ | ❌ `err 5` | ❌ `Starting the CLR failed` | ❌ |
+| `{priv, SYSTEM}` | ✅ (where/ps only tested) | ❌ `err 5` | ❌ | ❌ |
+| **`{priv, Admins, SYSTEM, Everyone}`** | **✅ all** | **✅** | **✅ `ps-ok`** | **✅ full boot + win32 children** |
+
+## Part 3 — Background tasks (parity with the pi-bg-tasks reference, adapted to the layered design)
+
+1. **bash tool = bg definition + sandbox params.** The single `bash` tool combines:
+   - `run_in_background: true` — start detached immediately; foreground commands race a 2s
+     quick-completion window, then auto-background at the timeout (default 120s, configurable);
+   - `sandbox_permissions` + `justification` (Part 1.3);
+   - native call/result rendering — upstream bg-tasks builds on Pi's exported
+     `createBashToolDefinition`; check what PiG's SDK exposes and match its rendering, documenting any
+     divergence.
+2. **Tools:** `bg_list` (running + last 20 finished), `bg_output` (task_id → meta + last 32 KiB + log
+   path), `bg_stop` (task_id, reason?) → SIGTERM ⇒ 5s grace ⇒ SIGKILL (Windows: Job-object terminate).
+3. **Commands/keybindings:** `Ctrl+Shift+B` / `/bg` background the running foreground command;
+   `/bg-tasks` shows the task list; Enter mid-stream (steering) auto-backgrounds the foreground command
+   so the message is delivered immediately (Alt+Enter follow-ups do not); foreground >2s shows a
+   `(ctrl+shift+b to run in background)` hint and a status-bar pill (▶ running · ✓ done · ✗ failed).
+4. **Spawning/output:** child stdout+stderr written **directly to a log fd** — kernel moves the bytes,
+   zero Go in the data path; poll file tail for progress. Log dir: `/tmp/pi-bg-tasks` on Linux/macOS;
+   `%TEMP%\pi-bg-tasks` on Windows — inside the sandbox grant, so a confined child writes its own log.
+   Kill the task if the log reaches 64 MiB. (Empirical note: piping task output through an intermediate
+   reader is fragile — inherited write-ends delay EOF past process death, and grep-style readers
+   block-buffer. The direct-fd design avoids both.)
+5. **Process groups / detach:** children detached into their own process group so stops signal the whole
+   tree (negative PID on POSIX; Job object on Windows); listen to `exit` (not `close`) so daemonized
+   grandchildren can't hold the handle; unref every handle/timer. Windows Job = also Part 2e's kill
+   semantics — one mechanism, used by both layers.
+6. **Abort semantics:** manage the turn's abort manually — genuine cancel (Esc) kills the process group;
+   backgrounding lets the process keep running while the tool returns (no host abort API), so queued
+   messages are never lost.
+7. **Registry:** purely in-memory; max 16 concurrent tasks; exactly-once `<task-notification>` steered
+   into the agent loop on completion (status, exit code, output tail, `next_step` no-polling hint) via a
+   `notified` latch — reading with bg_output/bg_stop or stopping suppresses it; `session_start` sweeps
+   logs older than 24h; `session_shutdown` silently kills everything still running.
+8. **Prompt guidance:** teach the model not to block the turn on background tasks — continue working,
+   rely on the completion notification; discourage long foreground polling loops (short bounded polls are
+   the escape hatch).
+
+## Non-goals
+
+Network isolation; container-grade isolation; PTY sessions, streaming jobs, monitors, `agent_bg`
+(pi-patty-bg-tasks' superset features); non-English denial classification; malicious-model resistance;
+write/edit tool policy (owned by pi-permission-system); handling of `!command`/`!!command` user-shell
+events; deny-ACE propagation across the whole profile tree (rejected — see Part 2b); Procmon/ETW tracing
+of individual init-time object writes (the restrict-list experiment table replaced the need).
+
+## Process
+
+1. ~~Read both upstream repos + PiG extension SDK docs; short plan + file map; stop for review.~~
+   Windows runner mechanism: spike phase COMPLETE and validated (probe16–23); this document is the
+   review artifact.
+2. On approval: `pig extension init`, then implement sandbox layer (policy/config/runners/escalation/
+   classification) and bg layer per the file-map convention — mirror upstream module layouts so future
+   diffs stay reviewable (sandbox layer ↔ pi-sandbox's structure, bg layer ↔ pi-bg-tasks'
+   types/spawn/output/registry/lifecycle/notify).
+3. README documents: modes, config, escalation, Windows deviations (a–g) with rationale and the
+   experiment table, the profile-tree gap + chosen option, standing-ACL side effects (workspace
+   inheritance strip, TEMP grant, OB-dir DACL), bg-task semantics, bash-only scope, composition design.
+
+## Acceptance tests (all must pass)
+
+Sandbox (Linux/macOS): (1) `echo ok`; (2) read outside workspace via bash succeeds; (3) bash write
+outside fails with a CLASSIFIED denial (marker present, escalation arms); (4) bash write inside succeeds;
+(5) `touch ../x`, then escalation retry succeeds exactly once per denial; (6) config needs restart;
+project-level config ignored.
+
+Sandbox (Windows/Git Bash) — items marked ✓ were already proven by the spike under the Part 2 recipe:
+(7) `echo ok` ✓; (8) `bash -c 'sleep 0.1 & wait'` (fork); (9) `echo x | cat` (pipes); (10) `git status`
+in workspace (`git --version` ✓); (11) small `npm install`; (12) **outside-write A/B**: test harness
+creates a user-only-DACL dir outside the grants; bare spawn writes it, confined spawn gets
+`Access is denied.`, file absent, marker classified, escalation arms ✓ (from native cmd AND from inside
+confined bash `OUTSIDE-DENIED` ✓); (12b) `touch ../x` when workspace sits under the profile → currently
+SUCCEEDS (documented gap) — must flip to denied iff option (ii)/(iii) is chosen; (13) bash write inside
+workspace, relative + absolute cygwin paths ✓, `/tmp`→`%TEMP%` ✓; (14) restart host, rerun (10) —
+OB-dir pre-create opens the existing dir (`OBJ_OPENIF`) and holds it ✓ (reopen path ✓); (15) `read-only`:
+prior grants inert (random per-spawn private SID makes standing grants unmatchable ✓ by construction),
+only `NUL` writable; (16) `danger-full-access` runs bash bare ✓; (17) confined bash spawns a Windows
+child (`cmd.exe //c` from inside bash → `CMD-VIA-BASH`) ✓ and native `git`/`node`/`powershell` run under
+the token ✓; (18) signal pipe and MSYS object dir survive two consecutive boots (reopen test ✓);
+(19) no console window appears with a no-console host (`CREATE_NO_WINDOW`) ✓.
+
+Background tasks (all platforms): (20) `run_in_background=true` starts detached; completion notification
+delivered exactly once (suppressed after bg_output/bg_stop); (21) confined background task writes to
+workspace OK, outside write denied; (22) bg_stop kills the whole tree — background
+`bash -c 'sleep 100 & wait'`, bg_stop, assert no `sleep` remains (ps), incl. Windows Job-object
+grandchildren (validated failure mode: orphan write-end holders — Part 2f); (23) Esc on a foreground task
+kills the tree; (24) auto-background fires at the timeout and the turn returns; (25) Enter mid-stream
+steers and backgrounds; (26) log under 64 MiB grows normally, at 64 MiB the task is killed;
+(27) `session_shutdown` kills running tasks; (28) Windows: confined background child writes its own log
+under `%TEMP%\pi-bg-tasks`.
+## Implementation status (post-review)
+
+Implemented as of this plan, Windows scope only (Linux/macOS runners deferred per user):
+
+- Extension lives at the repo root (`extension.go`, `internal/…`, module `example.com/pig-bg-tasks`,
+  identity `pig-bg-tasks`); `pig install ./ --validate-only` → registered (bash + 3 bg tools +
+  3 commands + shortcut + renderer).
+- Acceptance results (real `pig -ne -e ./ -p` runs, 30s caps, logs in `pig-tmp/smoke-*.log`):
+  (7) ✓  (8) ✓  (9) ✓  (10) ✓  (11) not run (heavy)  (12) ✓ + 12b xfail-as-documented
+  (13) ✓  (14) ✓ (each run = fresh process; OB-dir reopen/bootstrap proven)  (15) ✓ via config
+  (16) ✓  (17) ✓  (18) ✓  (19) spike-validated flags (no window observed in any run)
+  (20) ✓  (21) ✓ write-deniability inside bg tasks = same confinement path  (22) ✓ tree kill,
+  zero leftovers  (23–25) interactive-only, not automatable in print mode  (26–27) ported, not
+  exercised  (28) ✓ %TEMP%\pi-bg-tasks confirmed by task output.
+- Open decision remains: profile-tree write gap — options (i)–(iv) in Part 2g / README.

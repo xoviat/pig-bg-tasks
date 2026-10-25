@@ -1,0 +1,16 @@
+[package]
+name = "runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bg.workspace = true
+policy.workspace = true
+mxc-sdk.workspace = true
+serde_json = "1"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

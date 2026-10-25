@@ -1,0 +1,4 @@
+pig-tmp/
+go.work
+go.work.sum
+target/

@@ -1,0 +1,2 @@
+[patch.crates-io]
+pig-sdk = { path = "~/.pig/state/pigsdk/sdk-rs-d8f02d83c091a8c1" }

@@ -1,0 +1,44 @@
+# pig-bg-tasks — Rust rewrite workspace (RUST-PLAN §5).
+# Workspace name TBD (plan drafted "srt-rs/"; srt-win dies at Phase 4).
+# Root extension package: the pig factory `pub fn new_extension()` lands in
+# Phase 2 with pig-sdk = "0.1.0" (pig resolves the staged SDK at build time,
+# E7-verified); Phase 1 is runner-only, no pig.
+[workspace]
+resolver = "2"
+members = ["bg", "policy", "runner", "classify", "escalate"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# E9 pin: exact version, no ranges.
+mxc-sdk = "1.0.1"
+bg = { path = "bg" }
+policy = { path = "policy" }
+runner = { path = "runner" }
+classify = { path = "classify" }
+escalate = { path = "escalate" }
+
+[package]
+name = "pig-bg-tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Root package exists so `tests/` (the smoke matrix) is wired from day one.
+
+[dependencies]
+bg.workspace = true
+policy.workspace = true
+runner.workspace = true
+classify.workspace = true
+escalate.workspace = true
+serde_json = "1"
+# Pig resolves this dependency to the version-matched staged SDK at build
+# time (E7-verified; `PIG_SDK_RS_ROOT` / the staged SDK under the active
+# config root). It is NOT on crates.io — plain cargo cannot resolve this
+# package; pig owns the build (generated runner, runtime cell), so there is
+# deliberately no [patch] here (a relative patch would break in pig's cell
+# cache copy).
+pig-sdk = "0.1.0"
