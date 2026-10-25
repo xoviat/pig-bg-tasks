@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::ERR_SHELL_UNAVAILABLE;
+use crate::runner::ERR_SHELL_UNAVAILABLE;
 
 static CONFIGURED: Mutex<String> = Mutex::new(String::new());
 static RESOLVED: Mutex<Option<String>> = Mutex::new(None);
@@ -78,7 +78,7 @@ pub fn resolve() -> Result<String, String> {
         if p.is_file() {
             // Go: EvalSymlinks-else-Clean shape, but dunce-cleaned (no `\\?\`
             // prefix in user-visible shell paths).
-            let abs = policy::canonical(&c);
+            let abs = crate::policy::canonical(&c);
             *g(&RESOLVED) = Some(abs.clone());
             return Ok(abs);
         }
@@ -252,6 +252,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn look_path_finds_cmd() {
         let got = look_path("cmd");

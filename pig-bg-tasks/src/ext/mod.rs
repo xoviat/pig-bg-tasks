@@ -13,10 +13,10 @@ pub mod tasks;
 
 use std::time::SystemTime;
 
-use bg::registry::Registry;
+use crate::bg::registry::Registry;
 use pig_sdk::{CommandResult, Extension};
-use policy::{self, resolve_effective_mode};
-use runner::converge::{Engine, State as ConvergeState};
+use crate::policy::resolve_effective_mode;
+use crate::runner::converge::{Engine, State as ConvergeState};
 use serde_json::Value;
 
 use port::port_for;
@@ -50,7 +50,7 @@ pub fn build() -> Extension {
         "ctrl+shift+b",
         "Background the current foreground process",
         |ctx| {
-            bg::ui::background_active_foreground(
+            crate::bg::ui::background_active_foreground(
                 Registry::shared(),
                 Some(&|msg: &str, level: &str| ctx.notify(msg, level)),
             );
@@ -60,7 +60,7 @@ pub fn build() -> Extension {
 
     // <task-notification> renders as one line: ● summary.
     ext.message_renderer(
-        bg::notify::TASK_NOTIFICATION_CUSTOM_TYPE,
+        crate::bg::notify::TASK_NOTIFICATION_CUSTOM_TYPE,
         |_ctx, message: Value, _options, width| {
             let mut summary = message
                 .pointer("/details/summary")
@@ -94,7 +94,7 @@ pub fn build() -> Extension {
         let behavior = data.get("streamingBehavior").and_then(Value::as_str).unwrap_or("");
         let deliver_as = data.get("deliverAs").and_then(Value::as_str).unwrap_or("");
         if behavior == "steer" || deliver_as == "steer" {
-            bg::ui::pause_all_foreground(Registry::shared(), bg::BackgroundReason::Steer);
+            crate::bg::ui::pause_all_foreground(Registry::shared(), crate::bg::BackgroundReason::Steer);
         }
         None
     });
@@ -104,7 +104,7 @@ pub fn build() -> Extension {
         let reg = Registry::shared();
         reg.set_notifier(port_for(ctx));
         reg.set_non_interactive(!ctx.has_ui());
-        bg::registry::sweep_stale_logs(SystemTime::now());
+        crate::bg::registry::sweep_stale_logs(SystemTime::now());
         if let Ok(home) = ctx.config_home() {
             if !home.is_empty() {
                 resolve::pin_config_home(home);
@@ -118,13 +118,13 @@ pub fn build() -> Extension {
             .ok()
             .and_then(|s| s.get("shellPath").and_then(Value::as_str).map(String::from))
             .unwrap_or_default();
-        runner::shell::set_configured_shell(&configured);
+        crate::runner::shell::set_configured_shell(&configured);
         // Userland applets on the child PATH (E3-bis gap): settings'
         // `userlandDir` names a busybox-applet dir (sed/grep/awk/…), prepended
         // in both confined and bare spawns — host Git tools are MSYS and die
         // under MXC, and brush has no built-in sed. Fallback when the setting
         // is absent: `<configHome>/agent/userland` if it exists (drop-in dir,
-        // no settings edit needed). Both seams feed runner::request's PATH
+        // no settings edit needed). Both seams feed crate::runner::request's PATH
         // prepend; see bg_debug's `userland:` line.
         let settings_userland = ctx.get_settings().ok().and_then(|s| {
             s.get("userlandDir")
@@ -138,18 +138,18 @@ pub fn build() -> Extension {
                 .join("userland");
             p.is_dir().then(|| p.to_string_lossy().into_owned())
         });
-        runner::request::set_userland_dir(userland.as_deref().unwrap_or(""));
+        crate::runner::request::set_userland_dir(userland.as_deref().unwrap_or(""));
         // CONVERGENCE: synchronous now — initial epoch = startup policy state
         // (there is no background thread to spawn; only bash binds, and the
         // bind is a `stat` inside the call's duration).
         let cfg = resolve::config_for(ctx);
         Engine::shared().start(ConvergeState {
-            mode: resolve_effective_mode(policy::permission::get(), cfg.mode),
-            workspace: policy::canonical(ctx.cwd()),
+            mode: resolve_effective_mode(crate::policy::permission::get(), cfg.mode),
+            workspace: crate::policy::canonical(ctx.cwd()),
             temp: std::env::temp_dir().to_string_lossy().into_owned(),
             extras: cfg.extra_writable_dirs,
         });
-        bg::lifecycle::render_status_pill(&reg);
+        crate::bg::lifecycle::render_status_pill(&reg);
         None
     });
 
@@ -167,11 +167,11 @@ pub fn build() -> Extension {
         // (running) as the comment and CONVERGENCE.md's contract require.
         let (running, _terminal, _recent) = reg.snapshot();
         for j in running {
-            bg::lifecycle::terminate_job_silently(&reg, &j, "session_shutdown");
+            crate::bg::lifecycle::terminate_job_silently(&reg, &j, "session_shutdown");
         }
         if let Ok(id) = ctx.get_session_id() {
             if !id.is_empty() {
-                escalate::ledger::forget(&id);
+                crate::escalate::ledger::forget(&id);
             }
         }
         None

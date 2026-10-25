@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::glock;
+use crate::bg::glock;
 
 static MU: Mutex<()> = Mutex::new(());
 

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::{Mode, home_dir, is_mode};
+use crate::policy::{Mode, home_dir, is_mode};
 
 /// Mirrors the reference `SandboxConfig`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,8 +203,8 @@ fn covers(root: &str, child: &str) -> bool {
     if root == child {
         return true;
     }
-    let r = crate::lexical_clean(std::path::Path::new(root));
-    let c = crate::lexical_clean(std::path::Path::new(child));
+    let r = crate::policy::lexical_clean(std::path::Path::new(root));
+    let c = crate::policy::lexical_clean(std::path::Path::new(child));
     let r = r.to_string_lossy();
     let c = c.to_string_lossy();
     let (r, c) = (r.as_ref(), c.as_ref());
@@ -340,8 +340,8 @@ mod tests {
             let c = get(home);
             // temp (canonicalized + dup) + home; relative + missing dropped
             assert_eq!(c.extra_writable_dirs.len(), 2, "{:?}", c.extra_writable_dirs);
-            assert_eq!(c.extra_writable_dirs[0], crate::canonical(&tmp));
-            assert_eq!(c.extra_writable_dirs[1], crate::canonical(&home_dir().to_string_lossy()));
+            assert_eq!(c.extra_writable_dirs[0], crate::policy::canonical(&tmp));
+            assert_eq!(c.extra_writable_dirs[1], crate::policy::canonical(&home_dir().to_string_lossy()));
         });
     }
 }

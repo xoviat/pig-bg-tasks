@@ -1,9 +1,0 @@
-[package]
-name = "policy"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-serde_json = "1"
-dunce = "1"

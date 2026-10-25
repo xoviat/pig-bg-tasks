@@ -3,10 +3,10 @@
 
 use std::sync::OnceLock;
 
-use bg::registry::Registry;
-use escalate::{Decision, DenialReasonPrompt, Request, Ui};
+use crate::bg::registry::Registry;
+use crate::escalate::{Decision, DenialReasonPrompt, Request, Ui};
 use pig_sdk::Context;
-use policy::{Mode, config, permission, resolve_effective_mode};
+use crate::policy::{Mode, config, permission, resolve_effective_mode};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -66,11 +66,11 @@ pub fn resolve_call(
     summary: &str,
 ) -> Result<ResolvedCall, String> {
     let req_raw = params.get("sandbox_permissions").and_then(Value::as_str);
-    let (requested, req_present) = escalate::normalize_value(req_raw);
+    let (requested, req_present) = crate::escalate::normalize_value(req_raw);
     let just_raw = params.get("justification").and_then(Value::as_str);
-    let (justification, just_present) = escalate::normalize_value(just_raw);
+    let (justification, just_present) = crate::escalate::normalize_value(just_raw);
 
-    escalate::validate_args(
+    crate::escalate::validate_args(
         req_present.then_some(requested.as_str()),
         just_present.then_some(justification.as_str()),
     )?;
@@ -83,9 +83,9 @@ pub fn resolve_call(
     // Denial-first hard gate: a strictly wider request needs an unconsumed
     // real denial of the same subject this session; otherwise the fields are
     // ignored and the call runs at the current mode.
-    if escalate::is_strictly_wider(effective, &requested) {
+    if crate::escalate::is_strictly_wider(effective, &requested) {
         let session_id = ctx.get_session_id().unwrap_or_default();
-        if !escalate::ledger::consume(&session_id, escalate::ledger::Kind::Command) {
+        if !crate::escalate::ledger::consume(&session_id, crate::escalate::ledger::Kind::Command) {
             return Ok(ResolvedCall {
                 mode: effective,
                 escalated: false,
@@ -94,7 +94,7 @@ pub fn resolve_call(
         }
     }
 
-    let mode = escalate::approve(
+    let mode = crate::escalate::approve(
         &Request {
             requested_mode: requested,
             justification,
@@ -176,9 +176,9 @@ pub fn strip_escalation_placeholders(params: Value) -> Result<Value, String> {
 /// fields were dropped by the denial gate.
 pub fn escalation_notes(rc: &ResolvedCall) -> String {
     if rc.ignored_escalation {
-        escalate::ignored_marker(rc.mode)
+        crate::escalate::ignored_marker(rc.mode)
     } else if rc.escalated {
-        escalate::applied_marker(rc.mode)
+        crate::escalate::applied_marker(rc.mode)
     } else {
         String::new()
     }
@@ -187,7 +187,7 @@ pub fn escalation_notes(rc: &ResolvedCall) -> String {
 /// Convenience used by the tools: install this call's notifier (Go
 /// `SetNotifier` on every tool call — the newest session drives
 /// notifications).
-pub fn install_notifier(ctx: &Context) -> Arc<dyn bg::SdkPort> {
+pub fn install_notifier(ctx: &Context) -> Arc<dyn crate::bg::SdkPort> {
     let port = port_for(ctx);
     Registry::shared().set_notifier(port.clone());
     port

@@ -6,7 +6,7 @@
 //!   quoting);
 //! - [`proc`]: one spawn — confined through `mxc_sdk::v1::spawn`, bare
 //!   (`danger-full-access`) through `std::process` + a KILL_ON_JOB_CLOSE job
-//!   object — implementing [`bg::Handle`];
+//!   object — implementing [`crate::bg::Handle`];
 //! - [`converge`]: the epoch engine (CONVERGENCE.md) — one background
 //!   thread, bind/wait, causal fail-closed, collapse on rapid flips.
 
@@ -15,7 +15,7 @@ pub mod proc;
 pub mod request;
 pub mod shell;
 
-use policy::Mode;
+use crate::policy::Mode;
 
 /// Names a runner backend (Go `runner.Kind` — kept verbatim for `/sandbox`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

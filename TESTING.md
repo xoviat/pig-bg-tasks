@@ -194,7 +194,10 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cd pig-bg-tasks && cargo test --workspace     # bg, policy, runner, classify, escalate, smoke matrix
+cd pig-bg-tasks && cargo test              # single crate: 88 unit tests + 15 smoke tests (103 total)
+rustup target add x86_64-unknown-linux-gnu
+cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
+    # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean
 ```
 
 `pig-sdk` resolution for plain cargo comes from `pig-bg-tasks/.cargo/config.toml`,

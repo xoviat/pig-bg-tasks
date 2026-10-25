@@ -1,9 +1,0 @@
-[package]
-name = "bg"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-
-[dependencies]
-serde_json = "1"
-getrandom = "0.4"

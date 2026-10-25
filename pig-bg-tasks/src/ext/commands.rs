@@ -6,10 +6,10 @@
 //! convergence is synchronous now, so the message reports the *converged*
 //! epoch truthfully. Everything else keeps the reference wording.
 
-use bg::{Registry, ui};
+use crate::bg::{Registry, ui};
 use pig_sdk::{AutocompleteItem, CommandResult, Context};
-use policy::{self, Mode};
-use runner::converge::Engine;
+use crate::policy::Mode;
+use crate::runner::converge::Engine;
 
 use crate::ext::{port::port_for, resolve::config_for};
 
@@ -20,7 +20,7 @@ pub const BG_TASKS_DESC: &str = "List background tasks";
 /// `/sandbox` argument completions: the modes matching the prefix.
 pub fn sandbox_completions(argument_prefix: &str) -> Option<Vec<AutocompleteItem>> {
     let prefix = argument_prefix.trim();
-    let items: Vec<AutocompleteItem> = policy::SANDBOX_MODES
+    let items: Vec<AutocompleteItem> = crate::policy::SANDBOX_MODES
         .iter()
         .filter(|m| m.as_str().starts_with(prefix))
         .map(|m| AutocompleteItem {
@@ -33,7 +33,7 @@ pub fn sandbox_completions(argument_prefix: &str) -> Option<Vec<AutocompleteItem
 }
 
 fn join_modes() -> String {
-    policy::SANDBOX_MODES
+    crate::policy::SANDBOX_MODES
         .iter()
         .map(|m| m.as_str())
         .collect::<Vec<_>>()
@@ -47,7 +47,7 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
         ctx.notify(&sandbox_status(ctx), "info");
         return CommandResult::Ok;
     }
-    if !policy::is_mode(arg) {
+    if !crate::policy::is_mode(arg) {
         ctx.notify(
             &format!("sandbox: unknown mode \"{arg}\". Available: {}", join_modes()),
             "error",
@@ -61,7 +61,7 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
         "workspace-write" => Mode::WorkspaceWrite,
         _ => Mode::DangerFullAccess,
     };
-    policy::permission::set(mode);
+    crate::policy::permission::set(mode);
     let epoch = Engine::shared().set_mode(mode);
     ctx.notify(
         &format!(
@@ -77,8 +77,8 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
 /// env, epoch/convergence, extras, shell. Read-only: shared state only.
 pub fn sandbox_status(ctx: &Context) -> String {
     let cfg = config_for(ctx);
-    let effective = policy::resolve_effective_mode(policy::permission::get(), cfg.mode);
-    let source = if policy::permission::get().is_some() {
+    let effective = crate::policy::resolve_effective_mode(crate::policy::permission::get(), cfg.mode);
+    let source = if crate::policy::permission::get().is_some() {
         "/sandbox override"
     } else {
         "config default"
@@ -90,12 +90,12 @@ pub fn sandbox_status(ctx: &Context) -> String {
     } else {
         lines.push(format!(
             "runner: {}",
-            runner::describe(runner::select(cfg.probe_timeout_ms), effective)
+            crate::runner::describe(crate::runner::select(cfg.probe_timeout_ms), effective)
         ));
     }
-    let workspace = policy::canonical(ctx.cwd());
+    let workspace = crate::policy::canonical(ctx.cwd());
     lines.push(format!("workspace: {workspace}"));
-    let roots = policy::writable_roots(effective, &workspace, &cfg.extra_writable_dirs);
+    let roots = crate::policy::writable_roots(effective, &workspace, &cfg.extra_writable_dirs);
     if !roots.is_empty() {
         lines.push(format!("writable set: {}", roots.join(" ; ")));
     } else {
@@ -116,7 +116,7 @@ pub fn sandbox_status(ctx: &Context) -> String {
             cfg.extra_writable_dirs.join(", ")
         ));
     }
-    if let Ok(shell) = runner::shell::resolve() {
+    if let Ok(shell) = crate::runner::shell::resolve() {
         lines.push(format!("shell: {shell}"));
     }
     lines.join("\n")

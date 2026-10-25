@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::Arc;
 
-use bg::Handle as _;
-use policy::Mode;
+use pig_bg_tasks::bg::Handle as _;
+use pig_bg_tasks::policy::Mode;
 
 /// Everything the matrix needs, resolved once. `None` = this host lacks the
 /// native shell (tests then skip with a notice instead of failing — the
@@ -78,17 +78,17 @@ fn native_shell() -> Option<String> {
         return Some(brush.to_string_lossy().into_owned());
     }
     // fall back to host resolution only if it is native
-    runner::shell::reset_shell_cache();
-    runner::shell::set_configured_shell("");
-    let resolved = runner::shell::resolve().ok()?;
-    if runner::shell::is_msys_shell(&resolved) {
+    pig_bg_tasks::runner::shell::reset_shell_cache();
+    pig_bg_tasks::runner::shell::set_configured_shell("");
+    let resolved = pig_bg_tasks::runner::shell::resolve().ok()?;
+    if pig_bg_tasks::runner::shell::is_msys_shell(&resolved) {
         return None;
     }
     Some(resolved)
 }
 
 /// Run one script confined in the workspace, returning (exit, log body).
-fn confined(f: &Fixture, name: &str, script: &str, mode: Mode) -> (bg::Exit, String) {
+fn confined(f: &Fixture, name: &str, script: &str, mode: Mode) -> (pig_bg_tasks::bg::Exit, String) {
     confined_in(f, name, script, mode, &f.ws.clone())
 }
 
@@ -98,28 +98,28 @@ fn confined_in(
     script: &str,
     mode: Mode,
     cwd: &std::path::Path,
-) -> (bg::Exit, String) {
-    let roots = policy::writable_roots(mode, &f.ws.to_string_lossy(), &[]);
+) -> (pig_bg_tasks::bg::Exit, String) {
+    let roots = pig_bg_tasks::policy::writable_roots(mode, &f.ws.to_string_lossy(), &[]);
     let argv = vec![
         f.shell.clone(),
         "-c".to_string(),
         script.to_string(),
     ];
-    let req = runner::request::build_request(
+    let req = pig_bg_tasks::runner::request::build_request(
         &argv,
         &cwd.to_string_lossy(),
         &[("PATH".to_string(), f.path.clone())],
         &roots,
     );
     let log = f.logs.join(format!("{name}.log"));
-    let spec = runner::proc::Spec {
+    let spec = pig_bg_tasks::runner::proc::Spec {
         argv,
         cwd: cwd.to_string_lossy().into_owned(),
         env_extra: vec![],
         log_path: log.to_string_lossy().into_owned(),
         request: Some(req),
     };
-    let h = runner::proc::Handle::start(spec).expect("confined spawn");
+    let h = pig_bg_tasks::runner::proc::Handle::start(spec).expect("confined spawn");
     let exit = h.wait();
     let body = std::fs::read_to_string(&log).unwrap_or_default();
     (exit, body)
@@ -174,7 +174,7 @@ fn s03_profile_write_denied_and_classified() {
     let (exit, body) = confined(&f, "s03", &script, Mode::WorkspaceWrite);
     assert_ne!(exit.code, 0, "outside write must be denied: {body}");
     assert!(
-        classify::denial(Some(exit.code), &body, classify::DENIAL_SIGNATURES),
+        pig_bg_tasks::classify::denial(Some(exit.code), &body, pig_bg_tasks::classify::DENIAL_SIGNATURES),
         "denial must be classifiable (denial-first escalation depends on it): {body}"
     );
     assert!(!target.exists(), "file must not exist: {}", target.display());
@@ -191,7 +191,7 @@ fn s04_read_only_denies_workspace_write() {
     let (exit, body) = confined(&f, "s04", &script, Mode::Readonly);
     assert_ne!(exit.code, 0, "read-only must deny workspace writes: {body}");
     assert!(
-        classify::denial(Some(exit.code), &body, classify::DENIAL_SIGNATURES),
+        pig_bg_tasks::classify::denial(Some(exit.code), &body, pig_bg_tasks::classify::DENIAL_SIGNATURES),
         "{body}"
     );
     assert!(!target.exists());
@@ -210,14 +210,14 @@ fn s05_danger_bare_writes_outside() {
         format!("echo BARE_OK > \"{}\"", target.display()),
     ];
     let log = f.logs.join("s05.log");
-    let spec = runner::proc::Spec {
+    let spec = pig_bg_tasks::runner::proc::Spec {
         argv,
         cwd: f.ws.to_string_lossy().into_owned(),
         env_extra: vec![("PATH".to_string(), f.path.clone())],
         log_path: log.to_string_lossy().into_owned(),
         request: None,
     };
-    let h = runner::proc::Handle::start(spec).expect("bare spawn");
+    let h = pig_bg_tasks::runner::proc::Handle::start(spec).expect("bare spawn");
     let exit = h.wait();
     assert_eq!(exit.code, 0, "{exit:?}");
     assert!(target.is_file(), "bare mode must write outside");
@@ -316,13 +316,13 @@ fn s11_busybox_userland_confined() {
 /// with an actionable message (instead of an in-container mxc#1061 death).
 #[test]
 fn s12_msys_engine_rejected_before_spawn() {
-    let err = runner::shell::ensure_confined_shell("C:\\Program Files\\Git\\bin\\bash.exe")
+    let err = pig_bg_tasks::runner::shell::ensure_confined_shell("C:\\Program Files\\Git\\bin\\bash.exe")
         .expect_err("Git Bash must be rejected");
     assert!(err.starts_with("SANDBOX_UNAVAILABLE: the resolved shell is an MSYS"), "{err}");
     assert!(err.contains("shellPath") && err.contains("brush.exe"), "{err}");
     // and the native engine passes
     if let Some(f) = fixture() {
-        runner::shell::ensure_confined_shell(&f.shell).expect("native shell accepted");
+        pig_bg_tasks::runner::shell::ensure_confined_shell(&f.shell).expect("native shell accepted");
     }
 }
 
@@ -358,22 +358,22 @@ fn s14_confined_kill() {
     }
     let sleep_exe = f.ws.join("sleep.exe");
     let argv = vec![f.shell.clone(), "-c".to_string(), format!("\"{}\" 30", sleep_exe.display())];
-    let roots = policy::writable_roots(Mode::WorkspaceWrite, &f.ws.to_string_lossy(), &[]);
-    let req = runner::request::build_request(
+    let roots = pig_bg_tasks::policy::writable_roots(Mode::WorkspaceWrite, &f.ws.to_string_lossy(), &[]);
+    let req = pig_bg_tasks::runner::request::build_request(
         &argv,
         &f.ws.to_string_lossy(),
         &[("PATH".to_string(), f.path.clone())],
         &roots,
     );
     let log = f.logs.join("s14.log");
-    let spec = runner::proc::Spec {
+    let spec = pig_bg_tasks::runner::proc::Spec {
         argv,
         cwd: f.ws.to_string_lossy().into_owned(),
         env_extra: vec![],
         log_path: log.to_string_lossy().into_owned(),
         request: Some(req),
     };
-    let h = runner::proc::Handle::start(spec).expect("confined spawn");
+    let h = pig_bg_tasks::runner::proc::Handle::start(spec).expect("confined spawn");
     std::thread::sleep(std::time::Duration::from_millis(800));
     assert!(h.try_wait().is_none(), "still sleeping");
     let t = std::time::Instant::now();
@@ -388,16 +388,16 @@ fn s14_confined_kill() {
 #[test]
 fn s15_epoch_bind_and_status_shape() {
     let Some(f) = skip_or_get() else { return };
-    let eng = runner::converge::Engine::default();
+    let eng = pig_bg_tasks::runner::converge::Engine::default();
     let ws = f.ws.to_string_lossy().into_owned();
-    eng.start(runner::converge::State {
+    eng.start(pig_bg_tasks::runner::converge::State {
         mode: Mode::WorkspaceWrite,
         workspace: ws.clone(),
         temp: std::env::temp_dir().to_string_lossy().into_owned(),
         extras: vec![],
     });
     let state = eng
-        .bind(runner::converge::State {
+        .bind(pig_bg_tasks::runner::converge::State {
             mode: Mode::WorkspaceWrite,
             workspace: ws.clone(),
             temp: std::env::temp_dir().to_string_lossy().into_owned(),
@@ -407,18 +407,18 @@ fn s15_epoch_bind_and_status_shape() {
     let line = eng.status_line();
     assert!(line.starts_with("epoch 1 — converged: workspace-write"), "{line}");
     // spawn under the bound state
-    let roots = policy::writable_roots(state.mode, &state.workspace, &[]);
+    let roots = pig_bg_tasks::policy::writable_roots(state.mode, &state.workspace, &[]);
     assert_eq!(roots.len(), 2, "workspace + temp: {roots:?}");
     let argv = vec![f.shell.clone(), "-c".to_string(), "echo S15_OK".into()];
-    let req = runner::request::build_request(&argv, &ws, &[], &roots);
-    let spec = runner::proc::Spec {
+    let req = pig_bg_tasks::runner::request::build_request(&argv, &ws, &[], &roots);
+    let spec = pig_bg_tasks::runner::proc::Spec {
         argv,
         cwd: ws,
         env_extra: vec![],
         log_path: f.logs.join("s15.log").to_string_lossy().into_owned(),
         request: Some(req),
     };
-    let h = runner::proc::Handle::start(spec).expect("spawn under bound state");
+    let h = pig_bg_tasks::runner::proc::Handle::start(spec).expect("spawn under bound state");
     let e = h.wait();
     assert_eq!(e.code, 0, "{e:?}");
 }

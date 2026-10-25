@@ -1,44 +1,37 @@
-# pig-bg-tasks — Rust rewrite workspace (RUST-PLAN §5).
-# Workspace name TBD (plan drafted "srt-rs/"; srt-win dies at Phase 4).
-# Root extension package: the pig factory `pub fn new_extension()` lands in
-# Phase 2 with pig-sdk = "0.1.0" (pig resolves the staged SDK at build time,
-# E7-verified); Phase 1 is runner-only, no pig.
+# pig-bg-tasks — single-crate Rust extension (was a 6-crate workspace;
+# collapsed 2026-10-25 for compile speed per maintainer directive — see
+# RUST-PLAN §5 amendment). The pig factory `pub fn new_extension()` is the
+# only entry point; pig resolves the staged SDK at cell-build time.
 [workspace]
 resolver = "2"
-members = ["bg", "policy", "runner", "classify", "escalate"]
 
-[workspace.package]
+[package]
+name = "pig-bg-tasks"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
-[workspace.dependencies]
+[dependencies]
+serde_json = "1"
 # E9 pin: exact version, no ranges.
 mxc-sdk = "1.0.1"
-bg = { path = "bg" }
-policy = { path = "policy" }
-runner = { path = "runner" }
-classify = { path = "classify" }
-escalate = { path = "escalate" }
-
-[package]
-name = "pig-bg-tasks"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-# Root package exists so `tests/` (the smoke matrix) is wired from day one.
-
-[dependencies]
-bg.workspace = true
-policy.workspace = true
-runner.workspace = true
-classify.workspace = true
-escalate.workspace = true
-serde_json = "1"
+getrandom = "0.4"
+dunce = "1"
 # Pig resolves this dependency to the version-matched staged SDK at build
 # time (E7-verified; `PIG_SDK_RS_ROOT` / the staged SDK under the active
 # config root). It is NOT on crates.io — plain cargo cannot resolve this
 # package; pig owns the build (generated runner, runtime cell), so there is
 # deliberately no [patch] here (a relative patch would break in pig's cell
-# cache copy).
+# cache copy). The machine-local plain-cargo override lives in
+# `.cargo/config.toml` (absolute path required).
 pig-sdk = "0.1.0"
+
+# Windows-only: job-object tree kills + CREATE_NO_WINDOW. Everything else
+# (incl. mxc-sdk — its own windows deps are target-gated upstream) builds on
+# any platform; the POSIX runner is deferred (runtime Kind::Unavailable).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

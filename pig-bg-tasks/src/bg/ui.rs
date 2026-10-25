@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::json;
 
-use crate::notify::one_line;
-use crate::output::read_last_line;
-use crate::port::SdkPort;
-use crate::registry::{BackgroundReason, Job, JobStatus, Registry};
+use crate::bg::notify::one_line;
+use crate::bg::output::read_last_line;
+use crate::bg::port::SdkPort;
+use crate::bg::registry::{BackgroundReason, Job, JobStatus, Registry};
 
 const HINT_KEY: &str = "bg-hint";
 const HINT_TEXT: &str = "(ctrl+shift+b to run in background)";
@@ -154,8 +154,8 @@ pub fn format_job_list(reg: &Registry) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::MockPort;
-    use crate::registry::ForegroundSlot;
+    use crate::bg::mock::MockPort;
+    use crate::bg::registry::ForegroundSlot;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
@@ -210,24 +210,24 @@ mod tests {
         show_background_hint(&port);
         show_background_hint(&port);
         {
-            let w = crate::glock(&port.widgets);
+            let w = crate::bg::glock(&port.widgets);
             assert_eq!(w.len(), 1, "second show does not re-set");
             assert_eq!(w[0].0, "bg-hint");
             assert_eq!(w[0].1, Some(json!(["(ctrl+shift+b to run in background)"])));
         }
         clear_background_hint(&port);
         {
-            let w = crate::glock(&port.widgets);
+            let w = crate::bg::glock(&port.widgets);
             assert_eq!(w.len(), 1, "still held by the other reference");
         }
         clear_background_hint(&port);
         {
-            let w = crate::glock(&port.widgets);
+            let w = crate::bg::glock(&port.widgets);
             assert_eq!(w.len(), 2, "last release clears");
             assert_eq!(w[1].1, None);
         }
         clear_background_hint(&port); // underflow guard: no-op
-        let w = crate::glock(&port.widgets);
+        let w = crate::bg::glock(&port.widgets);
         assert_eq!(w.len(), 2);
     }
 

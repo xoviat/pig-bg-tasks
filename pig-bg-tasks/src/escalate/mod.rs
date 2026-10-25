@@ -9,7 +9,7 @@
 
 pub mod ledger;
 
-use policy::Mode;
+use crate::policy::Mode;
 
 /// Strictly wider escalation targets per effective mode. `read-only` is the
 /// floor and never an escalation target.

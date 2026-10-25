@@ -6,9 +6,9 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
-use crate::glock;
-use crate::handle::{Exit, ExitState, Handle};
-use crate::port::{CustomMessage, SendOptions, SdkPort};
+use crate::bg::glock;
+use crate::bg::handle::{Exit, ExitState, Handle};
+use crate::bg::port::{CustomMessage, SendOptions, SdkPort};
 
 /// A handle whose death the test controls. First write to the exit cell wins,
 /// exactly like a real spawn (an already-dead process cannot be re-killed).

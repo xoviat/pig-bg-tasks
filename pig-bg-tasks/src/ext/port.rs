@@ -1,4 +1,4 @@
-//! The SDK adapter: implements the extension's [`bg::SdkPort`] over a
+//! The SDK adapter: implements the extension's [`crate::bg::SdkPort`] over a
 //! retained pig [`Context`] (SDK D19 — `Context: Clone` verified in E7).
 //!
 //! Every tool call installs a fresh port (`set_notifier` on each call, Go
@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use bg::port::{CustomMessage, SendOptions, SdkPort};
+use crate::bg::port::{CustomMessage, SendOptions, SdkPort};
 use pig_sdk::{Context, SendMessageOptions};
 use serde_json::Value;
 

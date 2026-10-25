@@ -10,7 +10,7 @@
 
 use std::sync::{Condvar, Mutex};
 
-use crate::glock;
+use crate::bg::glock;
 
 /// The spawn's terminal state. `killed` marks a kill WE initiated (job
 /// terminate) so callers can tell deliberate stops from failures — Windows

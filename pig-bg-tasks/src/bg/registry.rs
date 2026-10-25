@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::glock;
-use crate::handle::Handle;
-use crate::port::SdkPort;
-use crate::{MAX_CONCURRENT_JOBS, RECENT_TERMINAL_KEEP};
+use crate::bg::glock;
+use crate::bg::handle::Handle;
+use crate::bg::port::SdkPort;
+use crate::bg::{MAX_CONCURRENT_JOBS, RECENT_TERMINAL_KEEP};
 
 /// JobStatus mirrors the reference (`timed_out` reserved, no producer in v1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -457,7 +457,7 @@ pub fn log_path_for(id: &str) -> PathBuf {
 
 /// Delete logs older than 24h (session_start housekeeping).
 pub fn sweep_stale_logs(now: std::time::SystemTime) -> usize {
-    use crate::STALE_LOG_MAX_AGE_SECS;
+    use crate::bg::STALE_LOG_MAX_AGE_SECS;
     let dir = log_dir();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return 0;
@@ -482,8 +482,8 @@ pub fn sweep_stale_logs(now: std::time::SystemTime) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handle::Exit;
-    use crate::mock::MockHandle;
+    use crate::bg::handle::Exit;
+    use crate::bg::mock::MockHandle;
 
     #[test]
     fn job_id_shape_and_uniqueness() {

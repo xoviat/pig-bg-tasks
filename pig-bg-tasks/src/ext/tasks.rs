@@ -1,8 +1,8 @@
 //! Port of `internal/tools/tasks.go` — the three task-management tools
 //! (parity with pi-bg-tasks' tools-tasks.ts).
 
-use bg::registry::{Job, Registry};
-use bg::{lifecycle, output, ui};
+use crate::bg::registry::{Job, Registry};
+use crate::bg::{lifecycle, output, ui};
 use pig_sdk::Context;
 use pig_sdk::{ToolDefinition, ToolResult};
 use serde_json::json;
@@ -77,7 +77,7 @@ pub fn bg_output_definition() -> ToolDefinition {
                 lifecycle::render_status_pill(&reg);
                 let tail = output::strip_ansi(&output::read_bounded_tail(
                     &j.log_path,
-                    bg::TASK_OUTPUT_TAIL_CHARS as i64,
+                    crate::bg::TASK_OUTPUT_TAIL_CHARS as i64,
                 ));
                 let mut b = String::new();
                 for l in meta_lines(&j) {
@@ -136,7 +136,7 @@ pub fn bg_stop_definition() -> ToolDefinition {
                 let gone = lifecycle::terminate_job_silently(&reg, &j, &reason);
                 // Bounded wait for the actual death so we return the real outcome.
                 let _ = gone.recv_timeout(std::time::Duration::from_secs(
-                    bg::KILL_GRACE_SECS + 1,
+                    crate::bg::KILL_GRACE_SECS + 1,
                 ));
                 lifecycle::render_status_pill(&reg);
                 write_meta(&mut b);

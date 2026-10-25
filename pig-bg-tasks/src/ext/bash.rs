@@ -8,13 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use bg::registry::{ForegroundSlot, Registry};
-use bg::{lifecycle, output, ui, BackgroundReason, Handle as _};
+use crate::bg::registry::{ForegroundSlot, Registry};
+use crate::bg::{lifecycle, output, ui, BackgroundReason, Handle as _};
 use pig_sdk::{Context, ToolDefinition, ToolResult};
-use policy::{self, config::Config, Mode};
-use runner::converge::{Engine, State as ConvergeState};
-use runner::proc::{self, Spec};
-use runner::{ErrUnavailable, request, select, shell};
+use crate::policy::{config::Config, Mode};
+use crate::runner::converge::{Engine, State as ConvergeState};
+use crate::runner::proc::{self, Spec};
+use crate::runner::{ErrUnavailable, request, select, shell};
 use serde_json::{Value, json};
 
 use crate::ext::resolve::{config_for, escalation_notes, install_notifier, resolve_call, strip_escalation_placeholders, ResolvedCall};
@@ -108,10 +108,10 @@ fn bash_execute(ctx: &Context, params: Value) -> ToolResult {
         .and_then(Value::as_f64)
         .filter(|v| *v > 0.0)
         .map(|v| (v * 1000.0) as u64)
-        .unwrap_or(bg::DEFAULT_TIMEOUT_MS);
+        .unwrap_or(crate::bg::DEFAULT_TIMEOUT_MS);
 
     let id = reg.new_job_id();
-    let log_path = bg::registry::log_path_for(&id).to_string_lossy().into_owned();
+    let log_path = crate::bg::registry::log_path_for(&id).to_string_lossy().into_owned();
     let session_id = ctx.get_session_id().unwrap_or_default(); // ledger writes at classify time
 
     // Bind to the newest epoch and converge synchronously — the wait is part
@@ -120,14 +120,14 @@ fn bash_execute(ctx: &Context, params: Value) -> ToolResult {
     // window; causal failure = fail-closed.
     let state = ConvergeState {
         mode: rc.mode,
-        workspace: policy::canonical(&cwd),
+        workspace: crate::policy::canonical(&cwd),
         temp: std::env::temp_dir().to_string_lossy().into_owned(),
         extras: cfg.extra_writable_dirs.clone(),
     };
     let converged = match Engine::shared().bind(state) {
         Ok(s) => s,
         Err(err) => {
-            bg::dbg::trace(json!({
+            crate::bg::dbg::trace(json!({
                 "phase": "converge_failed", "id": id, "mode": rc.mode.as_str(), "err": err
             }));
             return ToolResult::Error(format!(
@@ -141,15 +141,15 @@ fn bash_execute(ctx: &Context, params: Value) -> ToolResult {
     let spec = match build_spec(&rc.mode, &cwd, &command, &log_path, &converged) {
         Ok(s) => s,
         Err(e) => {
-            bg::dbg::trace(json!({
+            crate::bg::dbg::trace(json!({
                 "phase": "refused", "id": id, "mode": rc.mode.as_str(), "cwd": cwd, "err": e
             }));
             return ToolResult::Error(e); // fail-closed: confined construction refuses
         }
     };
-    bg::dbg::trace(json!({
+    crate::bg::dbg::trace(json!({
         "phase": "start", "id": id, "mode": rc.mode.as_str(),
-        "confined": policy::is_confined(rc.mode),
+        "confined": crate::policy::is_confined(rc.mode),
         "epoch": Engine::shared().snapshot().epoch,
         "shell": spec.argv[0], "bg": run_bg, "cwd": cwd, "log": log_path
     }));
@@ -161,7 +161,7 @@ fn bash_execute(ctx: &Context, params: Value) -> ToolResult {
         let h = match proc::Handle::start(spec) {
             Ok(h) => h,
             Err(e) => {
-                bg::dbg::trace(json!({"phase": "start_error", "id": id, "bg": true, "err": e}));
+                crate::bg::dbg::trace(json!({"phase": "start_error", "id": id, "bg": true, "err": e}));
                 return ToolResult::Error(format!("failed to start background command: {e}"));
             }
         };
@@ -203,7 +203,7 @@ fn build_spec(
     let shell = match shell::resolve() {
         Ok(s) => s,
         Err(e) => {
-            if policy::is_confined(*mode) {
+            if crate::policy::is_confined(*mode) {
                 return Err(ErrUnavailable {
                     detail: "bash shell could not be resolved (PATH, then standard Git for Windows locations)"
                         .to_string(),
@@ -220,14 +220,14 @@ fn build_spec(
         log_path: log_path.to_string(),
         request: None,
     };
-    if !policy::is_confined(*mode) {
+    if !crate::policy::is_confined(*mode) {
         return Ok(spec); // danger-full-access: bare (explicit escape hatch)
     }
-    if select(0).kind == runner::Kind::Unavailable {
+    if select(0).kind == crate::runner::Kind::Unavailable {
         return Err(ErrUnavailable { detail: String::new() }.to_string());
     }
     shell::ensure_confined_shell(&spec.argv[0])?;
-    let roots = policy::writable_roots(*mode, &converged.workspace, &converged.extras);
+    let roots = crate::policy::writable_roots(*mode, &converged.workspace, &converged.extras);
     spec.request = Some(request::build_request(&spec.argv, cwd, &[], &roots));
     Ok(spec)
 }
@@ -236,7 +236,7 @@ fn build_spec(
 fn run_foreground(
     ctx: &Context,
     reg: &Registry,
-    port: &Arc<dyn bg::SdkPort>,
+    port: &Arc<dyn crate::bg::SdkPort>,
     spec: Spec,
     rc: ResolvedCall,
     id: String,
@@ -250,7 +250,7 @@ fn run_foreground(
     let h = match proc::Handle::start(spec) {
         Ok(h) => h,
         Err(e) => {
-            bg::dbg::trace(json!({"phase": "start_error", "id": id, "bg": false, "err": e}));
+            crate::bg::dbg::trace(json!({"phase": "start_error", "id": id, "bg": false, "err": e}));
             return ToolResult::Error(format!("failed to start command: {e}"));
         }
     };
@@ -258,7 +258,7 @@ fn run_foreground(
     let job = reg.new_running_job(
         &id,
         &command,
-        Some(handle.clone() as Arc<dyn bg::Handle>),
+        Some(handle.clone() as Arc<dyn crate::bg::Handle>),
         &log_path,
         tcid,
         "",
@@ -281,12 +281,12 @@ fn run_foreground(
     }
 
     let started = Instant::now();
-    let quick_end = started + Duration::from_millis(bg::QUICK_COMPLETION_MS);
+    let quick_end = started + Duration::from_millis(crate::bg::QUICK_COMPLETION_MS);
     let deadline = started + Duration::from_millis(timeout_ms);
     let interactive = !reg.is_non_interactive();
     let mut streaming = false;
     let mut hinted = false;
-    let mut streamer: Option<bg::output::Streamer> = None;
+    let mut streamer: Option<crate::bg::output::Streamer> = None;
     #[allow(unused_assignments)] // every loop exit path assigns before break
     let mut outcome: Option<Result<String, String>> = None;
 
@@ -381,22 +381,22 @@ fn ctx_cancelled(ctx: &Context) -> bool {
 /// stdout+stderr log tail instead of a piped stderr; documented divergence).
 fn finish_foreground(
     rc: &ResolvedCall,
-    e: &bg::Exit,
+    e: &crate::bg::Exit,
     log_path: &str,
     session_id: &str,
     _cfg: &Config,
 ) -> Result<String, String> {
     let mut output =
-        output::read_bounded_tail(log_path, bg::OUTPUT_PREVIEW_CHARS as i64);
+        output::read_bounded_tail(log_path, crate::bg::OUTPUT_PREVIEW_CHARS as i64);
     let notes = escalation_notes(rc);
 
-    if policy::is_confined(rc.mode) && !e.killed && e.code != 0 && e.code != -1 {
+    if crate::policy::is_confined(rc.mode) && !e.killed && e.code != 0 && e.code != -1 {
         let code = e.code;
         // Runner failure first: the command NEVER RAN (init fatal).
         if let Some(fatal) =
-            classify::runner_failure(Some(code), &output, &classify::WINDOWS_RULES)
+            crate::classify::runner_failure(Some(code), &output, &crate::classify::WINDOWS_RULES)
         {
-            bg::dbg::trace(json!({
+            crate::bg::dbg::trace(json!({
                 "phase": "runner_failure", "code": code, "fatal": fatal, "log": log_path
             }));
             // No host work on the tool path beyond the synchronous heal: the
@@ -411,15 +411,15 @@ fn finish_foreground(
             ));
         }
         // Real denial: record it (arms the denial-first gate) + annotate.
-        if classify::denial(Some(code), &output, classify::DENIAL_SIGNATURES) {
-            bg::dbg::trace(json!({"phase": "denial", "code": code, "log": log_path}));
+        if crate::classify::denial(Some(code), &output, crate::classify::DENIAL_SIGNATURES) {
+            crate::bg::dbg::trace(json!({"phase": "denial", "code": code, "log": log_path}));
             if !session_id.is_empty() {
-                escalate::ledger::record(session_id, escalate::ledger::Kind::Command);
+                crate::escalate::ledger::record(session_id, crate::escalate::ledger::Kind::Command);
             }
             output.push('\n');
-            output.push_str(&escalate::denial_marker(rc.mode));
+            output.push_str(&crate::escalate::denial_marker(rc.mode));
             output.push('\n');
-            output.push_str(escalate::escalation_hint_marker());
+            output.push_str(crate::escalate::escalation_hint_marker());
         }
     }
 

@@ -30,14 +30,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
-name = "bg"
-version = "0.1.0"
-dependencies = [
- "getrandom 0.4.3",
- "serde_json",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -102,10 +94,6 @@ name = "cidr"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
-
-[[package]]
-name = "classify"
-version = "0.1.0"
 
 [[package]]
 name = "const-oid"
@@ -179,13 +167,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "escalate"
-version = "0.1.0"
-dependencies = [
- "policy",
 ]
 
 [[package]]
@@ -596,13 +577,12 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 name = "pig-bg-tasks"
 version = "0.1.0"
 dependencies = [
- "bg",
- "classify",
- "escalate",
+ "dunce",
+ "getrandom 0.4.3",
+ "mxc-sdk",
  "pig-sdk",
- "policy",
- "runner",
  "serde_json",
+ "windows",
 ]
 
 [[package]]
@@ -618,14 +598,6 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
-
-[[package]]
-name = "policy"
-version = "0.1.0"
-dependencies = [
- "dunce",
- "serde_json",
-]
 
 [[package]]
 name = "potential_utf"
@@ -667,17 +639,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "runner"
-version = "0.1.0"
-dependencies = [
- "bg",
- "mxc-sdk",
- "policy",
- "serde_json",
- "windows",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 //! Port of `internal/proc` — one spawn with log output and tree-kill
-//! semantics, two backends behind one [`bg::Handle`] implementation:
+//! semantics, two backends behind one [`crate::bg::Handle`] implementation:
 //!
 //! - **confined**: `mxc_sdk::v1::spawn(ContainerRequest)` — stdout/stderr
 //!   arrive as pipes, so two pump threads append them to the log file (plan
@@ -17,6 +17,13 @@
 //! Exit production is a `try_wait` polling loop (20 ms) on both backends:
 //! `MxcProcess::wait(&mut)` would hold the mutex for the process's whole
 //! lifetime and deadlock `bg_stop`'s concurrent `kill(&mut)`.
+//!
+//! **Cross-platform note (2026-10-25):** the `windows` crate and job-object
+//! machinery are `#[cfg(windows)]`-gated; on POSIX the bare backend kills the
+//! direct child only (no job = no grandchildren) — whole-tree kill on Unix
+//! lands with the deferred POSIX runner (process groups), see README
+//! "Honest gaps". mxc-sdk itself is cross-platform; confinement on POSIX is
+//! runtime-gated to `Kind::Unavailable` (fail-closed, danger allowed).
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -25,10 +32,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bg::{Exit, ExitState, Handle as TaskHandle};
+use crate::bg::{Exit, ExitState, Handle as TaskHandle};
 use mxc_sdk::v1::{ContainerRequest, MxcProcess, SpawnOptions};
 
-use crate::request;
+use crate::runner::request;
 
 const POLL_MS: u64 = 20;
 
@@ -48,25 +55,34 @@ pub struct Spec {
     pub request: Option<ContainerRequest>,
 }
 
-/// Kernel handle wrapper. Safety: `HANDLE`s are process-wide integer-like
-/// values; `TerminateJobObject`/`TerminateProcess` are safe to invoke from
-/// any thread — Go shares the same handles across goroutines. Never closed
-/// (see module doc).
+/// Kernel handle wrapper (Windows). Safety: `HANDLE`s are process-wide
+/// integer-like values; `TerminateJobObject`/`TerminateProcess` are safe to
+/// invoke from any thread — Go shares the same handles across goroutines.
+/// Never closed (see module doc).
+#[cfg(windows)]
 #[derive(Clone, Copy)]
 struct RawHandle(windows::Win32::Foundation::HANDLE);
+#[cfg(windows)]
 unsafe impl Send for RawHandle {}
+#[cfg(windows)]
 unsafe impl Sync for RawHandle {}
 
 enum Inner {
     Bare {
         /// Fallback kill when the job attach is refused.
+        #[cfg(windows)]
         term: RawHandle,
+        #[cfg(windows)]
         job: Option<RawHandle>,
+        /// POSIX: no job objects — the direct child IS the kill target
+        /// (see module note for the tree-kill divergence).
+        #[cfg(not(windows))]
+        child: Arc<Mutex<Child>>,
     },
     Mxc { proc: Arc<Mutex<MxcProcess>> },
 }
 
-/// A running spawn implementing [`bg::Handle`].
+/// A running spawn implementing [`crate::bg::Handle`].
 pub struct Handle {
     pid: u32,
     killed: Arc<AtomicBool>,
@@ -84,6 +100,7 @@ impl TaskHandle for Handle {
     fn kill(&self) {
         self.killed.store(true, Ordering::SeqCst);
         match &self.inner {
+            #[cfg(windows)]
             Inner::Bare { term, job } => unsafe {
                 if let Some(job) = job {
                     let _ = windows::Win32::System::JobObjects::TerminateJobObject(job.0, 1);
@@ -91,6 +108,10 @@ impl TaskHandle for Handle {
                     let _ = windows::Win32::System::Threading::TerminateProcess(term.0, 1);
                 }
             },
+            #[cfg(not(windows))]
+            Inner::Bare { child } => {
+                let _ = g(child).kill();
+            }
             Inner::Mxc { proc } => {
                 let mut p = g(proc);
                 let _ = p.kill();
@@ -153,16 +174,22 @@ impl Handle {
         }
         let child = cmd.spawn().map_err(|e| format!("proc: start: {e}"))?;
         let pid = child.id();
-        let job = unsafe { attach_pid(pid) }.map(RawHandle);
-        let term = unsafe { open_process_for_terminate(pid) }
-            .map(RawHandle)
-            .map_err(|e| format!("proc: open process: {e}"))?;
 
         let child = Arc::new(Mutex::new(child));
         let killed = Arc::new(AtomicBool::new(false));
         let exit = Arc::new(ExitState::new());
-        spawn_watcher(WatchKind::Bare(child), killed.clone(), exit.clone());
-        Ok(Handle { pid, killed, exit, inner: Inner::Bare { term, job } })
+        spawn_watcher(WatchKind::Bare(child.clone()), killed.clone(), exit.clone());
+        #[cfg(windows)]
+        let inner = {
+            let job = unsafe { attach_pid(pid) }.map(RawHandle);
+            let term = unsafe { open_process_for_terminate(pid) }
+                .map(RawHandle)
+                .map_err(|e| format!("proc: open process: {e}"))?;
+            Inner::Bare { term, job }
+        };
+        #[cfg(not(windows))]
+        let inner = Inner::Bare { child };
+        Ok(Handle { pid, killed, exit, inner })
     }
 
     fn start_confined(spec: Spec, request: ContainerRequest) -> Result<Handle, String> {
@@ -253,6 +280,7 @@ fn pump(stream: &mut dyn Read, mut file: File) {
 /// Put the child (by pid) in a `KILL_ON_JOB_CLOSE` job; `None` when the
 /// host refuses (nested jobs older than Win8, access denied) — callers keep
 /// working with the direct-process fallback.
+#[cfg(windows)]
 unsafe fn attach_pid(pid: u32) -> Option<windows::Win32::Foundation::HANDLE> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::JobObjects::{
@@ -294,6 +322,7 @@ unsafe fn attach_pid(pid: u32) -> Option<windows::Win32::Foundation::HANDLE> {
     Some(job)
 }
 
+#[cfg(windows)]
 unsafe fn open_process_for_terminate(pid: u32) -> Result<windows::Win32::Foundation::HANDLE, String> {
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE};
     OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, pid).map_err(|e| e.to_string())
@@ -322,6 +351,7 @@ mod tests {
         assert_eq!(err, "proc: empty argv");
     }
 
+    #[cfg(windows)]
     #[test]
     fn bare_echo_writes_log_and_exit_zero() {
         let log = std::env::temp_dir().join("pi-proc-echo.log");
@@ -334,6 +364,7 @@ mod tests {
         let _ = std::fs::remove_file(&log);
     }
 
+    #[cfg(windows)]
     #[test]
     fn bare_exit_code_roundtrip() {
         let log = std::env::temp_dir().join("pi-proc-code.log");
@@ -343,6 +374,7 @@ mod tests {
         let _ = std::fs::remove_file(&log);
     }
 
+    #[cfg(windows)]
     #[test]
     fn log_dir_created() {
         let log = std::env::temp_dir().join("pi-proc-nested").join("deep").join("x.log");
@@ -354,8 +386,10 @@ mod tests {
 
     /// Both ping-based tests count PING.EXE on the host — one serializing
     /// lock (parallel runs cross-talked: observed flake).
+    #[cfg(windows)]
     static PING_MU: Mutex<()> = Mutex::new(());
 
+    #[cfg(windows)]
     #[test]
     fn kill_takes_whole_tree_while_a_waiter_blocks() {
         let _lock = PING_MU.lock().unwrap_or_else(|e| e.into_inner());
@@ -404,6 +438,7 @@ mod tests {
         let _ = std::fs::remove_file(&log);
     }
 
+    #[cfg(windows)]
     fn tasklist_raw(name: &str) -> String {
         let out = Command::new("tasklist")
             .args(["/FI", &format!("IMAGENAME eq {name}")])
@@ -412,6 +447,7 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    #[cfg(windows)]
     fn count_named(name: &str) -> usize {
         tasklist_raw(name).to_lowercase().matches(&name.to_lowercase()).count()
     }

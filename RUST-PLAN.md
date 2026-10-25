@@ -200,6 +200,22 @@ Phase 4 updates the document accordingly.
 
 ## 5. Crate layout and porting map
 
+> **Amended 2026-10-25 (maintainer directive, compile speed):** the 6-crate
+> workspace was **collapsed into the single `pig-bg-tasks` crate** — one
+> manifest, sources at `src/{bg,policy,runner,classify,escalate}/` (former
+> `*/src/lib.rs` → `*/mod.rs`), `cargo test` = 103 tests in 3 suites. The
+> layer boundaries below survive as modules; only the crate seams are gone.
+>
+> **Cross-platform gate (2026-10-25, maintainer directive):** `windows`
+> moved under `[target.'cfg(windows)'.dependencies]` (job objects +
+> `CREATE_NO_WINDOW` are `#[cfg(windows)]` in `runner/proc.rs`, with a POSIX
+> direct-child-kill fallback); Windows-only tests gated the same way;
+> `mxc-sdk` confirmed cross-platform upstream (its Windows deps are already
+> target-gated — no fork needed). Verified: `cargo check --target
+> x86_64-unknown-linux-gnu --all-targets` clean, native `cargo test` 103/103.
+> Runtime confinement on POSIX stays `Kind::Unavailable` (fail-closed; bare
+> allowed) until the deferred bwrap/landlock runner lands.
+
 Rust workspace in this repo (replaces `go.work`, `go.mod`, `extension.go`,
 `internal/`):
 

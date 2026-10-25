@@ -9,10 +9,10 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::handle::Exit;
-use crate::notify;
-use crate::registry::{Job, JobStatus, Registry};
-use crate::{KILL_GRACE_SECS, MAX_LOG_BYTES, OUTPUT_WATCH_INTERVAL_MS};
+use crate::bg::handle::Exit;
+use crate::bg::notify;
+use crate::bg::registry::{Job, JobStatus, Registry};
+use crate::bg::{KILL_GRACE_SECS, MAX_LOG_BYTES, OUTPUT_WATCH_INTERVAL_MS};
 
 /// Enforce the concurrency cap (caller-side check before spawn).
 pub fn assert_job_slot(reg: &Registry) -> Result<(), String> {
@@ -72,7 +72,7 @@ fn complete_job(reg: &Registry, job: &Arc<Job>, exit: Exit, should_notify: bool)
     }
     let (status, code) = status_from_exit(&exit);
     job.mark_terminal(status, code);
-    crate::dbg::trace(json!({
+    crate::bg::dbg::trace(json!({
         "phase": "bg_exit",
         "id": job.id,
         "status": status.as_str(),
@@ -112,7 +112,7 @@ pub fn finish_foreground_job(reg: &Registry, job: &Arc<Job>, exit: Exit) {
     if let Some(err) = &exit.err {
         rec["err"] = json!(err);
     }
-    crate::dbg::trace(rec);
+    crate::bg::dbg::trace(rec);
     render_status_pill(reg);
 }
 
@@ -241,9 +241,9 @@ pub fn render_status_pill(reg: &Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handle::{Exit, Handle};
-    use crate::mock::{MockHandle, MockPort};
-    use crate::port::SdkPort;
+    use crate::bg::handle::{Exit, Handle};
+    use crate::bg::mock::{MockHandle, MockPort};
+    use crate::bg::port::SdkPort;
 
     fn await_done(job: &Job, ms: u64) -> bool {
         wait_until(ms, || job.is_done())
@@ -334,7 +334,7 @@ mod tests {
         let port = Arc::new(MockPort::new());
         reg.set_notifier(port.clone() as Arc<dyn SdkPort>);
         let job = reg.new_running_job("bash-f1", "echo", None, "/tmp/f1.log", "tc1", "", false);
-        reg.set_foreground("tc1", crate::registry::ForegroundSlot::new(|_| {}));
+        reg.set_foreground("tc1", crate::bg::registry::ForegroundSlot::new(|_| {}));
         assert!(reg.foreground_present("tc1"));
         finish_foreground_job(&reg, &job, Exit::code(0));
         assert_eq!(port.send_count(), 0);
@@ -350,7 +350,7 @@ mod tests {
         let reg = Registry::new();
         let handle = Arc::new(MockHandle::running());
         let job = reg.new_running_job("bash-p1", "cmd", Some(handle.clone()), "/tmp/p1.log", "tc9", "", false);
-        reg.set_foreground("tc9", crate::registry::ForegroundSlot::new(|_| {}));
+        reg.set_foreground("tc9", crate::bg::registry::ForegroundSlot::new(|_| {}));
         promote_to_background(&reg, "tc9", &job, false);
         assert!(!reg.foreground_present("tc9"));
         assert!(job.is_backgrounded());
@@ -425,14 +425,14 @@ mod tests {
         let j = reg.new_running_job("bash-x", "c", None, "/tmp/x.log", "", "", true);
         render_status_pill(&reg);
         {
-            let st = crate::glock(&port.statuses);
+            let st = crate::bg::glock(&port.statuses);
             assert_eq!(st.last().unwrap().1, "▶ 1");
         }
         j.mark_terminal(JobStatus::Failed, Some(1));
         reg.forget(&j);
         render_status_pill(&reg);
         {
-            let st = crate::glock(&port.statuses);
+            let st = crate::bg::glock(&port.statuses);
             assert_eq!(st.last().unwrap().1, "✗ 1");
         }
         // no notifier → pill skipped silently (fresh registry)

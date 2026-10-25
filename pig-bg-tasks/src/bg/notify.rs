@@ -9,9 +9,9 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::output;
-use crate::port::{CustomMessage, SendOptions};
-use crate::registry::{Job, JobStatus, Registry};
+use crate::bg::output;
+use crate::bg::port::{CustomMessage, SendOptions};
+use crate::bg::registry::{Job, JobStatus, Registry};
 
 /// Identifies the steered message for renderers.
 pub const TASK_NOTIFICATION_CUSTOM_TYPE: &str = "bg-task-notification";
@@ -75,7 +75,7 @@ pub fn completion_summary(job: &Job) -> String {
 
 /// Render the `<task-notification>` XML block.
 pub fn build_task_notification(job: &Job, summary: &str) -> String {
-    let tail = output::read_bounded_tail(&job.log_path, crate::NOTIFY_TAIL_CHARS)
+    let tail = output::read_bounded_tail(&job.log_path, crate::bg::NOTIFY_TAIL_CHARS)
         .trim()
         .to_string();
     let tail = output::strip_ansi(&tail);
@@ -146,9 +146,9 @@ pub fn send_task_notification(reg: &Registry, job: &Arc<Job>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mock::MockPort;
-    use crate::port::SdkPort;
-    use crate::registry::Registry;
+    use crate::bg::mock::MockPort;
+    use crate::bg::port::SdkPort;
+    use crate::bg::registry::Registry;
 
     fn job_with(reg: &Registry, id: &str, cmd: &str) -> Arc<Job> {
         reg.new_running_job(id, cmd, None, "/tmp/n.log", "tc", "", true)
@@ -167,25 +167,25 @@ mod tests {
     fn summaries_match_reference() {
         let reg = Registry::new();
         let j = job_with(&reg, "bash-s", "make");
-        j.mark_terminal(crate::registry::JobStatus::Completed, Some(0));
+        j.mark_terminal(crate::bg::registry::JobStatus::Completed, Some(0));
         assert_eq!(completion_summary(&j), "Background command \"make\" completed");
         let j = job_with(&reg, "bash-s2", "make");
-        j.mark_terminal(crate::registry::JobStatus::Completed, Some(2));
+        j.mark_terminal(crate::bg::registry::JobStatus::Completed, Some(2));
         assert_eq!(
             completion_summary(&j),
             "Background command \"make\" completed (exit code 2)"
         );
         let j = job_with(&reg, "bash-s3", "make");
-        j.mark_terminal(crate::registry::JobStatus::Failed, Some(2));
+        j.mark_terminal(crate::bg::registry::JobStatus::Failed, Some(2));
         assert_eq!(
             completion_summary(&j),
             "Background command \"make\" failed with exit code 2"
         );
         let j = job_with(&reg, "bash-s4", "make");
-        j.mark_terminal(crate::registry::JobStatus::Killed, None);
+        j.mark_terminal(crate::bg::registry::JobStatus::Killed, None);
         assert_eq!(completion_summary(&j), "Background command \"make\" was stopped");
         let j = job_with(&reg, "bash-s5", "make");
-        j.mark_terminal(crate::registry::JobStatus::Failed, Some(1));
+        j.mark_terminal(crate::bg::registry::JobStatus::Failed, Some(1));
         j.set_stop_reason("output_limit");
         assert_eq!(
             completion_summary(&j),
@@ -197,7 +197,7 @@ mod tests {
     fn notification_xml_shape() {
         let reg = Registry::new();
         let j = job_with(&reg, "bash-abc123", "echo <hi> & bye");
-        j.mark_terminal(crate::registry::JobStatus::Completed, Some(0));
+        j.mark_terminal(crate::bg::registry::JobStatus::Completed, Some(0));
         let xml = build_task_notification(&j, "Background command \"echo\" completed");
         assert!(xml.starts_with("<task-notification>\n"));
         assert!(xml.contains("<task_id>bash-abc123</task_id>"));
@@ -215,13 +215,13 @@ mod tests {
         let port = Arc::new(MockPort::new());
         reg.set_notifier(port.clone() as Arc<dyn SdkPort>);
         let j = job_with(&reg, "bash-eo", "x");
-        j.mark_terminal(crate::registry::JobStatus::Completed, Some(0));
+        j.mark_terminal(crate::bg::registry::JobStatus::Completed, Some(0));
         assert!(send_task_notification(&reg, &j));
         assert!(!send_task_notification(&reg, &j), "second send suppressed");
         assert_eq!(port.send_count(), 1);
         // already latched by bg_output/bg_stop → no send
         let j2 = job_with(&reg, "bash-eo2", "x");
-        j2.mark_terminal(crate::registry::JobStatus::Completed, Some(0));
+        j2.mark_terminal(crate::bg::registry::JobStatus::Completed, Some(0));
         reg.latch_terminal(&j2);
         assert!(!send_task_notification(&reg, &j2));
         assert_eq!(port.send_count(), 1);
@@ -234,7 +234,7 @@ mod tests {
         port.set_fail_send(true);
         reg.set_notifier(port.clone() as Arc<dyn SdkPort>);
         let j = job_with(&reg, "bash-fail", "x");
-        j.mark_terminal(crate::registry::JobStatus::Failed, Some(9));
+        j.mark_terminal(crate::bg::registry::JobStatus::Failed, Some(9));
         assert!(!send_task_notification(&reg, &j), "failure is not a send");
         assert_eq!(port.send_count(), 0);
         assert!(j.notified(), "latched anyway");
@@ -260,7 +260,7 @@ mod tests {
     fn no_notifier_loses_but_evicts() {
         let reg = Registry::new();
         let j = job_with(&reg, "bash-nonote", "x");
-        j.mark_terminal(crate::registry::JobStatus::Completed, Some(0));
+        j.mark_terminal(crate::bg::registry::JobStatus::Completed, Some(0));
         assert!(!send_task_notification(&reg, &j));
         assert!(j.notified());
         let (_, done, _) = reg.counters();

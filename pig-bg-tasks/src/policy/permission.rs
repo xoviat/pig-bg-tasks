@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use crate::Mode;
+use crate::policy::Mode;
 
 static OVERRIDE: Mutex<Option<Mode>> = Mutex::new(None);
 

@@ -24,7 +24,7 @@
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
-use policy::Mode;
+use crate::policy::Mode;
 
 /// One policy state (Go `converge.State`).
 #[derive(Debug, Clone, PartialEq, Eq)]

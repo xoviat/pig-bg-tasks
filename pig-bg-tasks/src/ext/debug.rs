@@ -5,9 +5,9 @@
 //! spawn trace. The agent calls `bg_debug` directly instead of asking the
 //! user for slash-command output.
 
-use bg::registry::Registry;
+use crate::bg::registry::Registry;
 use pig_sdk::{ToolDefinition, ToolResult};
-use policy::{self, Mode};
+use crate::policy::Mode;
 use serde_json::json;
 use std::time::SystemTime;
 
@@ -72,19 +72,19 @@ pub fn debug_definition() -> ToolDefinition {
             let (_, done, failed) = reg.counters();
 
             let cfg = config_for(ctx);
-            let effective = policy::resolve_effective_mode(policy::permission::get(), cfg.mode);
-            let source = if policy::permission::get().is_some() {
+            let effective = crate::policy::resolve_effective_mode(crate::policy::permission::get(), cfg.mode);
+            let source = if crate::policy::permission::get().is_some() {
                 "/sandbox override"
             } else {
                 "config default"
             };
-            let workspace = policy::canonical(ctx.cwd());
-            let roots = policy::writable_roots(effective, &workspace, &cfg.extra_writable_dirs);
+            let workspace = crate::policy::canonical(ctx.cwd());
+            let roots = crate::policy::writable_roots(effective, &workspace, &cfg.extra_writable_dirs);
 
             let mut b = String::new();
             b.push_str(&format!(
                 "pig-bg-tasks debug  {}\n",
-                bg::dbg::rfc3339_at(SystemTime::now(), false)
+                crate::bg::dbg::rfc3339_at(SystemTime::now(), false)
             ));
             let sid = ctx.get_session_id().unwrap_or_default();
             b.push_str(&format!(
@@ -94,15 +94,15 @@ pub fn debug_definition() -> ToolDefinition {
             ));
             b.push_str(&format!(
                 "mode: {effective} ({source})  confined: {}\n",
-                policy::is_confined(effective)
+                crate::policy::is_confined(effective)
             ));
             b.push_str(&format!(
                 "runner: {}\n",
-                runner::describe(runner::select(cfg.probe_timeout_ms), effective)
+                crate::runner::describe(crate::runner::select(cfg.probe_timeout_ms), effective)
             ));
             b.push_str(&format!(
                 "convergence: {}\n",
-                runner::converge::Engine::shared().status_line()
+                crate::runner::converge::Engine::shared().status_line()
             ));
             b.push_str(&format!("workspace: {workspace}\n"));
             if !roots.is_empty() {
@@ -130,7 +130,7 @@ pub fn debug_definition() -> ToolDefinition {
                 Ok(st) => {
                     let mtime = st
                         .modified()
-                        .map(|t| bg::dbg::rfc3339_at(t, false))
+                        .map(|t| crate::bg::dbg::rfc3339_at(t, false))
                         .unwrap_or_default();
                     b.push_str(&format!(
                         "config file: {} ({} bytes, mtime {mtime})\n",
@@ -146,18 +146,18 @@ pub fn debug_definition() -> ToolDefinition {
                 }
             }
 
-            match runner::shell::resolve() {
+            match crate::runner::shell::resolve() {
                 Ok(shell) => b.push_str(&format!(
                     "shell: {shell}  (configured shellPath override: {:?})\n",
-                    runner::shell::configured_shell()
+                    crate::runner::shell::configured_shell()
                 )),
                 Err(e) => b.push_str(&format!(
                     "shell: UNRESOLVED: {e}  (configured shellPath override: {:?})\n",
-                    runner::shell::configured_shell()
+                    crate::runner::shell::configured_shell()
                 )),
             }
 
-            let userland = runner::request::userland_dir();
+            let userland = crate::runner::request::userland_dir();
             if userland.is_empty() {
                 b.push_str(
                     "userland: unset (no extra applets on child PATH — set settings `userlandDir` or create <configHome>/agent/userland)\n",
@@ -172,7 +172,7 @@ pub fn debug_definition() -> ToolDefinition {
                 terminal_in_map.len(),
                 recent.len(),
                 reg.is_non_interactive(),
-                MAX = bg::MAX_CONCURRENT_JOBS
+                MAX = crate::bg::MAX_CONCURRENT_JOBS
             ));
             for j in &running {
                 b.push_str(&format!(
@@ -207,10 +207,10 @@ pub fn debug_definition() -> ToolDefinition {
                 ));
             }
 
-            let recs = bg::dbg::tail(tail);
+            let recs = crate::bg::dbg::tail(tail);
             b.push_str(&format!(
                 "trace: {} (last {} records)\n",
-                bg::dbg::path().display(),
+                crate::bg::dbg::path().display(),
                 recs.len()
             ));
             for r in &recs {

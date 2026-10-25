@@ -19,14 +19,21 @@ non-malicious model — not adversarial isolation.
 
 **Platform status: Windows is implemented and accepted end-to-end** (MXC containment; gates E1–E10 +
 R11 in `RUST-DECISION.md`, smoke matrix 15/15, acceptance runs through real `pig -ne -e -p` sessions
-in `TESTING.md`). Linux (bwrap/landlock) and macOS (seatbelt) runners are deferred; the POSIX side of
-the runner is behind the same `Kind`/`Enforcement` seam. On non-Windows hosts confined calls fail
-closed with a message naming the deferral; `danger-full-access` still runs bare.
+in `TESTING.md`). Linux (bwrap/landlock) and macOS (seatbelt) **runners** are deferred; the POSIX
+side of the runner is behind the same `Kind`/`Enforcement` seam. On non-Windows hosts confined calls
+fail closed with a message naming the deferral; `danger-full-access` still runs bare.
+
+**The crate itself is cross-platform** (gate 2026-10-25): `cargo check --target
+x86_64-unknown-linux-gnu --all-targets` is clean; the `windows` crate (job objects,
+`CREATE_NO_WINDOW`) lives under `[target.'cfg(windows)'.dependencies]` with a POSIX fallback (bare
+backend kills the direct child — see Honest gaps); `mxc-sdk` is cross-platform upstream (its own
+Windows deps are target-gated), so no isolation-layer fork was needed.
 
 ## Install / develop
 
 ```bash
-cargo test --workspace                  # 103 tests (bg/runner/policy/escalate/classify + smoke)
+cargo test                            # 103 tests: 88 unit (bg/policy/runner/classify/escalate) + 15 smoke — single crate
+cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (rustup target add first)
 pig install ./pig-bg-tasks --validate-only --json   # cell build + registration check
 PIG_HOME=<scratch-home> pig -ne -e "$(pwd)/pig-bg-tasks" -p   # piped-prompt run
 ```
@@ -219,6 +226,10 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
   must be native (busybox), not Git's `/usr/bin`.
 - **No persistent containers (E13 drop)**: policy is rebuilt per spawn (~37 ms E8 baseline) instead
   of held for a session; the seam is retained for a future backend.
+- **POSIX is build-only, not run-ready**: the crate compiles and unit/smoke tests are portable, but
+  the confined path is runtime-gated to `Kind::Unavailable` (fail-closed with the deferral message;
+  `danger-full-access` runs bare). Without job objects, the POSIX bare backend kills the **direct
+  child only** — whole-tree kill on Unix (process groups) lands with the deferred POSIX runner.
 - **Userland provisioning is manual** (`userlandDir`/drop-in dir) until the shipping strategy in
   `RUST-PLAN.md` §10.7 lands.
 - Classification is English-only; the bash-call trace file (`%TEMP%\pi-bg-tasks\bash-calls.jsonl`)
@@ -244,7 +255,7 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
 Full recipe, observed outputs, and traps: **`TESTING.md`**. Summary (all real pig runs,
 2026-10-25): `pig install ./pig-bg-tasks --validate-only --json` → `valid: true`,
 `registered: true`, `packable: true`, tools `[bash, bg_list, bg_output, bg_stop, bg_debug]`, commands
-`[bg, bg-tasks, sandbox]` ✓; `cargo test --workspace` 103/103 ✓ (smoke matrix 15/15 incl. confined
+`[bg, bg-tasks, sandbox]` ✓; `cargo test` 103/103 ✓ (smoke matrix 15/15 incl. confined
 echo, profile-write denial + classification, read-only denial, schannel HTTPS, busybox userland,
 MSYS fail-fast, parallel spawns, whole-tree kill, epoch bind); piped-prompt acceptance: confined
 `echo` (`HARNESS_OK`), userland `sed`/`grep`/`awk`/`wc` with `command -v sed` → `…\ubin\sed`,
