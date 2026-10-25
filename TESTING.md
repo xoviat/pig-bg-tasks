@@ -241,6 +241,14 @@ cached; start again to build the current source`. Freeze the tree, run,
 - The scratch settings copied from the real home may list `packages`
   (including the Go pig-bg-tasks package). `-ne` skips them — one more reason
   never to drop `-ne`.
+- **`.cargo/config.toml`'s `pig-sdk` patch path must be ABSOLUTE.** Cargo does
+  not expand `~`: if the file shows a `~/.pig/state/pigsdk/…` form (observed
+  2026-10-25 rewritten mid-session, mtime traced to a pig run window — some
+  staging step normalizes it), plain cargo fails with
+  `failed to read <workspace>\pig-bg-tasks\~\.pig\… (os error 3)`. Restore
+  `path = "%USERPROFILE%/.pig/state/pigsdk/sdk-rs-<hash>"` (the dir must
+  exist under `%USERPROFILE%\.pig\state\pigsdk\`). Pig's own cell builds are
+  unaffected — they resolve the SDK themselves.
 
 ## 8. Where things live
 

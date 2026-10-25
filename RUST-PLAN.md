@@ -14,8 +14,8 @@ object-dir bootstrap) with **Microsoft eXecution Containers** (`microsoft/mxc`,
 `mxc-sdk` Rust crate), and port the extension itself from Go to **Rust** (PiG
 supports Rust extensions natively: factory `pub fn new_extension() -> Extension`
 in `src/lib.rs`; `pig extension init --lang rust`). `srt-win/` is deleted at the
-end — code, CLI, and both gate documents (their evidence is preserved here and
-in git history).
+end — code and CLI (the two gate documents are NOT deleted: they live in
+`docs/evidence/`, imported from the Go repo with gate-result headers).
 
 Behavior that must survive unchanged (it is the product, not the mechanism):
 
@@ -74,7 +74,7 @@ protection).
   **read-only**, and **denied** path sets + network posture + UI restrictions —
   reads stay ambient-ish while writes are scoped, which is the one property
   `CreateRestrictedToken` + `WRITE_RESTRICTED` cannot express without breaking
-  Schannel (`srt-win/SCHANNEL-GATE.md`: the trigger is the mere presence of a
+  Schannel (`docs/evidence/SCHANNEL-GATE.md`, archived in Phase 4: the trigger is the mere presence of a
   restricting-SID list).
 - Enforcement tiers on Windows (`processcontainer`, min build 26100), selected
   at runtime by `fallback_detector.rs`:
@@ -92,7 +92,7 @@ protection).
   grants "propagat[ing] an agent SID's ACE through entire subtrees —
   catastrophic for drive roots, the Windows directory, the Users root,
   ProgramFiles, and ProgramData" (issue #330) — independent corroboration of
-  `PLAN.txt`'s 527-second measurement, and a problem T2/T1 avoid structurally.
+  `PLAN.txt`'s (Go repo) 527-second measurement, and a problem T2/T1 avoid structurally.
 - `mxc#1533` reports that under T1, "files outside explicit filesystem grants
   remain readable" — i.e. ambient reads + granted writes, which is exactly this
   product's desired shape (but it is filed as a bug-to-clarify, so Gate E4
@@ -122,7 +122,7 @@ Each gate has a **kill criterion** — what result stops or reshapes the rewrite
 | R2 | **Schannel gate**: `SEC_E_NO_CREDENTIALS` under containment (the whole reason for leaving `CreateRestrictedToken`) | **E2 TLS probe**: `pig-tmp/sspiprobe`-equivalent + `curl.exe` (schannel) + `cargo fetch` + PowerShell `Invoke-WebRequest` inside an MXC container on the winning tier; same commands outside as control | All four complete handshakes inside | Any schannel client fails at `AcquireCredentialsHandle` on the tier you ship ⇒ the goal is not met by MXC either; stop the rewrite (see §8) |
 | R3 | **Git Bash gate**: cygwin signal pipe (`{user, Administrators, SYSTEM}` SD) and `mxc#1464` (git cwd under T1) | **E3 shell matrix**: `bash -c "echo BASH_OK"`, `git status`, `git clone` over https, `cmd //c echo`, fork/pipe, from inside an MXC container; compare with the 34/34 `srt-smoke.sh` baseline | bash + git usable; failures attributable and documented at worst | bash dies at `couldn't create signal pipe` or git is unusable ⇒ **product decision required before Phase 1** (accept documented gap and steer to PowerShell, or hybrid: MXC for non-cygwin + legacy token for bash). Do not discover this in Phase 3 |
 | R4 | Read model: T2/T3 gate reads (AppContainer check); the product promises ambient reads | **E4 read matrix**: read `%USERPROFILE%\.gitconfig`, a repo outside the workspace, `C:\Windows\System32\drivers\etc\hosts`, HKCU via reg, inside the container on the winning tier | Reads ambient on T1; or on T2/T3, reads work with a *finite* `fs_read_only` set (E5 measured) | Reads require profile-wide grants to work ⇒ falls afoul of E5; stop or re-scope "reads ambient" as a documented limitation |
-| R5 | Broad `fs_read_only` grants cost (subtree inheritance; #330 mitigation; `PLAN.txt` 527 s wedge) | **E5 grant-cost probe**: time `fs_read_only = [C:\, %USERPROFILE%]`-equivalent grants on T3 (expect: refused or catastrophic — record actuals), and the *scoped* alternative (workspace + toolchains + profile subtrees actually read by the smoke suite) | Scoped set converges in < 1 s per epoch and the smoke suite passes within it | Only the broad grant works and it costs seconds+ per epoch ⇒ MXC-on-T3 is not viable for this UX; stop or ship T1-only |
+| R5 | Broad `fs_read_only` grants cost (subtree inheritance; #330 mitigation; Go-repo `PLAN.txt` 527 s wedge) | **E5 grant-cost probe**: time `fs_read_only = [C:\, %USERPROFILE%]`-equivalent grants on T3 (expect: refused or catastrophic — record actuals), and the *scoped* alternative (workspace + toolchains + profile subtrees actually read by the smoke suite) | Scoped set converges in < 1 s per epoch and the smoke suite passes within it | Only the broad grant works and it costs seconds+ per epoch ⇒ MXC-on-T3 is not viable for this UX; stop or ship T1-only |
 | R6 | Unelevated operation; `wxc-host-prep.exe` is `requireAdministrator` for one-time host prep | **E6 elevation audit**: launch containers unelevated with and without prior host-prep; record exactly which steps prompt UAC | Per-launch confinement is UAC-free; host-prep is one-time and fits pig's escalation-at-install flow | Per-launch UAC or machine-wide prerequisites beyond one-time prep ⇒ violates "never trigger or require UAC"; stop |
 | R7 | Long-running spawn semantics: bg needs Start/Wait split, arbitrary lifetime, tree kill, exit codes; MXC streams stdio via its own pipes | **E8 spawn probe**: Rust program using `mxc-sdk` starts a 30-minute child, streams output, kills the tree (`bg_stop` semantics: no orphans incl. grandchildren), reads exit codes; verify log-cap/auto-kill can still be enforced | Full bg lifecycle expressible over the SDK's spawn API | SDK only offers run-to-completion or no tree kill ⇒ the bg layer cannot be preserved as-is; stop (no acceptable workaround that forks a second mechanism) |
 | R8 | PiG Rust extension surface parity: retained contexts (SDK D19), `deliverAs=steer`, commands+completions, toasts, tool schema, `ctx.ConfigHome()`, events | **E7 scaffold spike**: `pig extension init --lang rust`, register `bash`/`bg_*` + `/sandbox`, one tool call, one steer notification round-trip | Parity for every API the current extension touches (checklist in §5) | Missing API (esp. retained contexts / steer delivery) ⇒ rewrite is blocked on the PiG SDK, not on MXC; keep Go for the extension layer and revisit (see §8 hybrid) |
@@ -321,6 +321,11 @@ still fail the rewrite has not delivered):
   persistent backend. No other change to the rewrite.
 
 ## 9. What gets deleted (Phase 4 checklist)
+
+> **Executed 2026-10-25.** Also removed beyond the original list (all preserved in the Go repo at
+> `~/workspace/pig-bg-tasks`): `tools/` (npm-era patch scripts), `PLAN.txt`, and
+> `PATCH-PI-BG-TASKS.md`. The gate documents were never part of this repo's `srt-win/` copy — they
+> were imported from the Go repo into `docs/evidence/` per the rule below.
 
 - `srt-win/` — all of it (library, `cmd/srt-win`, `cmd/pipeprobe`, debug tests).
 - `srt-win/GITBASH-GATE.md`, `srt-win/SCHANNEL-GATE.md` — archived to

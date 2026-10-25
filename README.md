@@ -205,10 +205,11 @@ promotion, `/sandbox` execution in TUI), localized-OS classification, POSIX plat
 
 ## Relation to the Go implementation
 
-This workspace replaces the Go extension (preserved untouched at `~/workspace/pig-bg-tasks`).
-`extension.go`, `internal/`, `go.*` files kept at the repo root are reference copies for diffing;
-`srt-win` was never copied here. The npm-package patch notes in the Go repo
-(`PATCH-PI-BG-TASKS.md`, `tools/`) do not apply to this build.
+This workspace replaces the Go extension; the full Go reference (extension, `internal/`, `srt-win/`,
+`PLAN.txt`, npm patch notes) is preserved untouched at `~/workspace/pig-bg-tasks`. Phase-4 cleanup
+removed every Go-era artifact from this repo (`RUST-PLAN.md` §9, executed 2026-10-25); the only
+imported evidence lives in `docs/evidence/` — the two gate reports behind `RUST-DECISION.md`, with
+headers recording their outcome for this build.
 
 ## License
 
