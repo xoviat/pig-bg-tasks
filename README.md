@@ -43,8 +43,57 @@ Rules that are easy to get wrong (full recipe: **`TESTING.md`**):
   `cargo` runs only — machine-local, never shipped.
 - **Freeze the tree during pig builds** (content-hash check) and warm the cell with
   `--validate-only` before timed piped runs (cold cell ≈ 9 min, warm ≈ 60 s).
-- Requires a native Win32 shell engine: `cargo install brush`, then `shellPath` →
-  `…\.cargo\bin\brush.exe`, plus a `userlandDir` (below).
+
+## Prerequisites: shell engine + userland
+
+Two things are NOT bundled with the extension — install/point to them yourself:
+
+### 1. Bash engine — **brush** (required)
+
+Confined spawns refuse MSYS/Git-Bash engines (mxc#1061, fail-fast with an actionable
+`shellPath` hint), so the extension needs a native Win32 bash:
+
+- **Project**: [reubeno/brush](https://github.com/reubeno/brush) — "Bo(u)rne RUsty SHell";
+  site/install docs: [brush.sh](https://brush.sh/getting-started/install/).
+- **Install**: `cargo install brush` — crates.io: [`brush`](https://crates.io/crates/brush)
+  (alias of [`brush-shell`](https://crates.io/crates/brush-shell); both provide `brush.exe`).
+  Alternates proven in the gate battery: `niubash` (→ `niu.exe`), rubash (→ `bash.exe`).
+- **Tested here**: `brush 0.4.0` at `%USERPROFILE%\.cargo\bin\brush.exe` — set pig's
+  `shellPath` (in `settings.json`, NOT `sandbox.json`) to that path.
+
+### 2. Userland applets — **busybox-w32** (`sed`, `grep`, `awk`, …)
+
+Brush has no builtin `sed`, and host Git tools are MSYS and die inside the container — so
+external utilities come from BusyBox-w32 (native Win32, 179 applets in the build used here):
+
+- **Project**: [frippery.org/busybox](https://frippery.org/busybox/) (busybox-w32 by Ron
+  Yorston); source mirrors: [GitHub rmyorston/busybox-w32](https://github.com/rmyorston/busybox-w32),
+  [GitLab](https://gitlab.com/rmyorston/busybox-w32).
+- **Download the binaries**: the prebuilt index → **<https://frippery.org/files/busybox/>**
+  (`busybox64.exe` builds, `SHA256SUM` alongside).
+- **The exact build used here**: `BusyBox v1.38.0-FRP-6075-g169694ebd (2026-05-06)` (mingw64),
+  kept at `pig-tmp/shell-candidates/busybox64.exe` (test hosts).
+- **The `ubin/` folder is not a special distribution**: it is 16 *byte-identical copies* of that
+  one binary renamed per applet (BusyBox dispatches on `argv[0]`):
+
+  ```text
+  awk cat cut diff find grep head ls mkdir ps sed sh sort tee wc xargs
+  ```
+
+  Rebuild anywhere with:
+
+  ```bash
+  mkdir ubin
+  for a in awk cat cut diff find grep head ls mkdir ps sed sh sort tee wc xargs; do
+    cp busybox64.exe "ubin/$a.exe"
+  done
+  ```
+
+  More applets = another rename (the binary contains all 179).
+- **Wire it up**: point pig's `userlandDir` setting at the directory, or drop the files at
+  `<configRoot>/agent/userland` (auto-detected fallback). `bg_debug`'s `userland:` line and
+  `command -v sed` inside a call confirm resolution. Extension-side auto-shipping is the one
+  open sub-question (`RUST-PLAN.md` §10.7).
 
 ## Tools
 
@@ -103,14 +152,16 @@ changes).
 
 Engine and userland come from pig **settings** (not `sandbox.json`):
 
-- `shellPath` — the bash engine. Confined spawns **refuse MSYS/Git-Bash engines before spawn**
+- `shellPath` — the bash engine (where to get it: **Prerequisites §1** — brush,
+  `cargo install brush`). Confined spawns **refuse MSYS/Git-Bash engines before spawn**
   (mxc#1061: the MSYS object namespace is denied under MXC; no config works around it) with an
   actionable hint: `cargo install brush` and point `shellPath` at `%USERPROFILE%\.cargo\bin\brush.exe`.
 - `userlandDir` — a busybox-applet directory (`sed`, `grep`, `awk`, `wc`, `find`, `sort`, …)
   prepended to the child PATH in confined **and** bare spawns (host Git tools are MSYS and die under
   MXC; brush has no built-in `sed`). Fallback: a drop-in `<configRoot>/agent/userland` directory.
-  `bg_debug` shows the resolved `userland:` line. Shipping strategy for fresh installs is the one
-  open sub-question (`RUST-PLAN.md` §10.7).
+  `bg_debug` shows the resolved `userland:` line. **Where the binaries come from and how `ubin/`
+  is built: Prerequisites §2** (frippery.org busybox-w32). Shipping strategy for fresh installs is
+  the one open sub-question (`RUST-PLAN.md` §10.7).
 
 ## Escalation (denial-first, bash only)
 
