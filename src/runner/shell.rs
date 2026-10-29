@@ -3,10 +3,6 @@
 //! then the standard Git for Windows locations, then `bash` on PATH — with
 //! WSL launcher aliases skipped on PATH unless configured explicitly, so bare
 //! commands never land in WSL by surprise. Cached per process.
-//!
-//! Plan §4 addition: under confinement an MSYS/Git-Bash engine is rejected
-//! **before spawn** with an actionable error pointing at `shellPath` →
-//! `brush.exe` (fail-fast instead of an in-container mxc#1061 death).
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -121,60 +117,6 @@ pub fn is_wsl_alias(p: &str) -> bool {
     n.ends_with("\\microsoft\\windowsapps\\bash.exe") || n.ends_with("\\system32\\bash.exe")
 }
 
-/// Whether the resolved shell is an MSYS/cygwin engine that cannot start
-/// inside an MXC container (mxc#1061: `NtCreateDirectoryObject(\BaseNamedObjects\…)`
-/// denied — maintainer-confirmed, no config workaround). Heuristic: path
-/// segment (Git/MSYS2/Cygwin roots) or a neighbouring `cygwin1.dll` /
-/// `msys-2.0.dll`. Native drop-in engines (brush.exe, rubash's bash.exe)
-/// pass.
-pub fn is_msys_shell(p: &str) -> bool {
-    let n = p.replace('/', "\\").to_lowercase();
-    // WSL launcher aliases (both the LOCALAPPDATA and Program Files
-    // WindowsApps locations) + System32: dead under confinement for the
-    // same reason as MSYS.
-    if n.ends_with("\\windowsapps\\bash.exe") || n.ends_with("\\system32\\bash.exe") {
-        return true;
-    }
-    let path_hit = [
-        "\\git\\bin\\bash.exe",
-        "\\git\\usr\\bin\\bash.exe",
-        "\\git\\mingw64\\bin\\bash.exe",
-        "\\msys64\\",
-        "\\msys2\\",
-        "\\msys-64\\",
-        "\\cygwin64\\",
-        "\\cygwin\\",
-    ]
-    .iter()
-    .any(|seg| n.contains(seg));
-    if path_hit {
-        return true;
-    }
-    // sibling runtime dll (covers relocated installs)
-    let dir = Path::new(p).parent().map(|d| d.to_path_buf());
-    if let Some(dir) = dir {
-        if dir.join("cygwin1.dll").is_file() || dir.join("msys-2.0.dll").is_file() {
-            return true;
-        }
-    }
-    false
-}
-
-/// Plan §4 fail-fast: confined spawns may not run an MSYS engine. Returns an
-/// actionable `SANDBOX_UNAVAILABLE`-style error before any spawn happens.
-pub fn ensure_confined_shell(shell: &str) -> Result<(), String> {
-    if is_msys_shell(shell) {
-        return Err(format!(
-            "SANDBOX_UNAVAILABLE: the resolved shell is an MSYS/Git-Bash engine ({shell}), which \
-             cannot start inside an MXC container (mxc#1061 — the MSYS object namespace is denied; \
-             no configuration works around it). Nothing was executed. Fix: set pig's `shellPath` \
-             setting to a native Win32 shell, e.g. `cargo install brush` then point `shellPath` at \
-             `%USERPROFILE%\\.cargo\\bin\\brush.exe`, and retry."
-        ));
-    }
-    Ok(())
-}
-
 /// Tests only.
 pub fn reset_shell_cache() {
     *g(&RESOLVED) = None;
@@ -221,24 +163,6 @@ mod tests {
         ));
         assert!(is_wsl_alias("C:\\Windows\\System32\\bash.exe"));
         assert!(!is_wsl_alias("C:\\Program Files\\Git\\bin\\bash.exe"));
-    }
-
-    #[test]
-    fn msys_detection_and_confined_failfast() {
-        assert!(is_msys_shell("C:\\Program Files\\Git\\bin\\bash.exe"));
-        assert!(is_msys_shell("C:\\msys64\\usr\\bin\\bash.exe"));
-        assert!(is_msys_shell("C:\\cygwin64\\bin\\bash.exe"));
-        assert!(is_msys_shell("C:\\Windows\\System32\\bash.exe"));
-        // native engines pass
-        assert!(!is_msys_shell("C:\\Users\\x\\.cargo\\bin\\brush.exe"));
-        assert!(!is_msys_shell("D:\\tools\\rubash\\bash.exe"));
-
-        let err = ensure_confined_shell("C:\\Program Files\\Git\\bin\\bash.exe").unwrap_err();
-        assert!(err.starts_with("SANDBOX_UNAVAILABLE: the resolved shell is an MSYS"), "{err}");
-        assert!(err.contains("shellPath"), "{err}");
-        assert!(err.contains("brush.exe"), "{err}");
-        assert!(err.contains("cargo install brush"), "{err}");
-        assert!(ensure_confined_shell("C:\\Users\\x\\.cargo\\bin\\brush.exe").is_ok());
     }
 
     #[test]

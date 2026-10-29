@@ -1,8 +1,6 @@
 > **Archived evidence (Phase-4 cleanup, 2026-10-25)** — copied from the Go repo `srt-win/`.
-> Gate result (RUST-DECISION E3/E3-bis, mxc#1061): Git Bash/MSYS engines CANNOT start inside an
-> MXC container — maintainer-confirmed, no config workaround. The Rust extension refuses MSYS
-> shells BEFORE spawn with an actionable shellPath hint (brush.exe). The restricted-token recipe
-> below is historical: srt-win is not used by this build.
+> The restricted-token recipe below is historical: srt-win is not used by this build, and its
+> Git Bash observations describe that old sandbox only — Git Bash runs fine here.
 
 # srt-win + Git Bash: the signal-pipe write-restriction wall
 

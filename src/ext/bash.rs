@@ -190,9 +190,6 @@ fn with_notes(text: &str, notes: &str) -> String {
 /// Assemble the spawn: resolved shell, log path, and — for confined modes —
 /// the bound epoch's policy. No host work, never blocks (convergence already
 /// happened). Every failure REFUSES the command (fail-closed, never bare).
-///
-/// Plan §4 addition: under confinement an MSYS/Git-Bash engine is rejected
-/// *before spawn* (mxc#1061 fail-fast) with an actionable `shellPath` hint.
 fn build_spec(
     mode: &Mode,
     cwd: &str,
@@ -226,7 +223,6 @@ fn build_spec(
     if select(0).kind == crate::runner::Kind::Unavailable {
         return Err(ErrUnavailable { detail: String::new() }.to_string());
     }
-    shell::ensure_confined_shell(&spec.argv[0])?;
     let roots = crate::policy::writable_roots(*mode, &converged.workspace, &converged.extras);
     spec.request = Some(request::build_request(&spec.argv, cwd, &[], &roots));
     Ok(spec)

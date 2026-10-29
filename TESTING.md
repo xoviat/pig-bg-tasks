@@ -1,6 +1,8 @@
-# Testing the Rust extension (`pig-bg-tasks/`)
+# Testing the Rust extension (repo root)
 
-The extension directory **must be named `pig-bg-tasks`**: a direct `-e`
+The extension directory **must be named `pig-bg-tasks`** — that is this
+repository's root, where the crate's `Cargo.toml`, `src/` and `tests/` live:
+a direct `-e`
 directory selection takes the _directory_ as the extension identity
 (`extensions.md`), and runtime registration is `Extension::new("pig-bg-tasks")`
 — a mismatch fails with `register:name_mismatch`. The Go extension's repo
@@ -25,8 +27,7 @@ mkdir -p "$PIG_HOME/agent"
 # seed ONLY the model config — never copy extensions/
 cp -n ~/.pig/agent/settings.json ~/.pig/agent/auth.json "$PIG_HOME/agent/"
 cp -n ~/.pig/agent/models.json ~/.pig/agent/models-store.json "$PIG_HOME/agent/" 2>/dev/null
-# retarget the TEST home's shell at brush — the real global config may still
-# point at Git Bash, which confined spawns REJECT by design (MSYS fail-fast)
+# retarget the TEST home's shell at brush (the engine these tests pin)
 python - <<'EOF'
 import json, pathlib
 p = pathlib.Path("pig-tmp/pig-home-test/agent/settings.json")
@@ -49,7 +50,7 @@ appear: `sdk-<hash>`, `sdk-py-<hash>`, `sdk-rs-<hash>`).
 ## 2. Load ONLY the Rust extension — always `-ne`
 
 ```bash
-PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)/pig-bg-tasks" …
+PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)" …
 ```
 
 `pig -ne` is `--no-extensions`: _"Skip discovered, configured, and built-in
@@ -64,7 +65,7 @@ loads wins, and a mixed session silently tests the wrong one.
 ## 3. Validate: build + registration, no session
 
 ```bash
-PIG_HOME="$PIG_HOME" pig install ./pig-bg-tasks --validate-only --json
+PIG_HOME="$PIG_HOME" pig install . --validate-only --json
 ```
 
 Resolution "builds or launches it, accepts runtime registration, verifies
@@ -84,7 +85,7 @@ produced.
 
 ```bash
 printf '%s\n' "Run: echo HARNESS_OK — use the bash tool and reply with its exact output." \
-  | PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)/pig-bg-tasks" -p \
+  | PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)" -p \
   > pig-tmp/smoke-rs-harness.log 2>&1
 ```
 
@@ -121,7 +122,7 @@ cached cell. Re-warm after ANY source edit.
 
 ### Observed (2026-10-25, this machine)
 
-- `pig install ./pig-bg-tasks --validate-only --json` →
+- `pig install . --validate-only --json` →
   `"valid": true, "registered": true`, definition
   `{form: factory, language: rust, package: pig-bg-tasks, factory:
 new_extension, packable: true, runtime: subprocess, sdk: pig-sdk-rs}` —
@@ -183,7 +184,7 @@ driver. General failure.` exit 1 (native tool runs; the driver refuses).
 ## 5. `session_start` without a model session
 
 ```bash
-PIG_HOME="$PIG_HOME" pig extension preview-login "$(pwd)/pig-bg-tasks"
+PIG_HOME="$PIG_HOME" pig extension preview-login "$(pwd)"
 ```
 
 "Start exactly one extension and render the login set during `session_start`;
@@ -194,24 +195,23 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cd pig-bg-tasks && cargo test              # single crate: 88 unit tests + 15 smoke tests (103 total)
+cargo test                                 # repo root, single crate: 87 unit tests + 14 smoke tests (101 total)
 rustup target add x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
     # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean
 ```
 
-`pig-sdk` resolution for plain cargo comes from `pig-bg-tasks/.cargo/config.toml`,
+`pig-sdk` resolution for plain cargo comes from `.cargo/config.toml`,
 which carries an **absolute-path** `[patch.crates-io]` to the staged SDK.
 It is deliberately a _config file_, not a `Cargo.toml` patch: pig copies
 sources into its cell, where a relative manifest patch would resolve to the
 wrong place (and pig resolves the dependency itself at build time anyway).
 
-The smoke matrix (`pig-bg-tasks/tests/smoke.rs`, 15 sections) drives the runner
+The smoke matrix (`tests/smoke.rs`, 14 sections) drives the runner
 directly against real MXC containers and needs this machine's shell facts
 (overridable by env):
 
-- `PIG_TEST_SHELL` — native Win32 shell (default: `%USERPROFILE%\.cargo\bin\brush.exe`,
-  per the E3 decision; MSYS/Git-Bash engines are rejected under confinement);
+- `PIG_TEST_SHELL` — the shell under test (default: `%USERPROFILE%\.cargo\bin\brush.exe`);
 - `PIG_TEST_BUSYBOX` — busybox-w32 source for the `sleep.exe` fixture
   (default: `pig-tmp/shell-candidates/busybox64.exe`; applet userland from
   `pig-tmp/shell-candidates/ubin` is prepended to the in-container `PATH`).
@@ -223,24 +223,17 @@ failing (they assert machine-class claims, same as the Phase 0 gates).
 
 - **No userland provisioning yet (deferred 2026-10-24).** The extension does
   NOT put busybox applets on the child `PATH` — so under `shellPath=brush`,
-  externals like **`sed` are unavailable inside confined spawns** (the host
-  PATH's `sed` is Git's MSYS build, which dies under MXC per the E3-bis
-  findings). The smoke matrix works around it by prepending
+  externals like **`sed` are unavailable inside confined spawns**. The smoke matrix works around it by prepending
   `pig-tmp/shell-candidates/ubin` in _its own_ spawn env; the extension
   proper does not. Keep harness prompts on brush builtins (`echo`, `test`,
   redirections), or treat missing-`sed` as this known gap — proper
   provisioning (ship applets + child-PATH wiring) is a **later session's
   task**.
-- **Never edit `pig-bg-tasks/` during a pig build.** Pig content-hashes the
+- **Never edit the extension source during a pig build.** Pig content-hashes the
   extension source while building the cell; a mid-build edit fails with
   `the source of … pig-bg-tasks changed while it was being built, so nothing was
 cached; start again to build the current source`. Freeze the tree, run,
   then edit (and rerun).
-- **The real global `shellPath` may be Git Bash** (it is, as of
-  2026-10-24). Confined spawns reject MSYS/Git-Bash engines _before_ spawn
-  (the mxc#1061 fail-fast, plan §4) — that is correct behavior, not a bug.
-  Always override `shellPath` in the TEST home (step 1) or expect every
-  confined `bash` call to return the `SANDBOX_UNAVAILABLE: … MSYS …` refusal.
 - The scratch settings copied from the real home may list `packages`
   (including the Go pig-bg-tasks package). `-ne` skips them — one more reason
   never to drop `-ne`.
@@ -252,6 +245,11 @@ cached; start again to build the current source`. Freeze the tree, run,
   `path = "%USERPROFILE%/.pig/state/pigsdk/sdk-rs-<hash>"` (the dir must
   exist under `%USERPROFILE%\.pig\state\pigsdk\`). Pig's own cell builds are
   unaffected — they resolve the SDK themselves.
+- **Run `cargo test` outside a pig sandbox (observed 2026-10-29).** Under
+  `workspace-write` confinement the process-enumeration tests fail spuriously:
+  `kill_takes_whole_tree_while_a_waiter_blocks` panics with
+  `grandchild ping never started` and an empty `tasklist` output — while Git
+  Bash itself runs fine in the sandbox. Unconfined: 101/101 ✓.
 
 ## 8. Where things live
 
@@ -262,7 +260,7 @@ cached; start again to build the current source`. Freeze the tree, run,
 | Model config (copied)        | `$PIG_HOME/agent/{settings,auth,models,models-store}.*`                                                  |
 | Print-mode run logs          | `pig-tmp/smoke-rs-*.log` (stderr half has tool traffic)                                                  |
 | Task logs / trace            | `%TEMP%\pi-bg-tasks\*.log`, `%TEMP%\pi-bg-tasks\bash-calls.jsonl` (also surfaced by the `bg_debug` tool) |
-| Unit/smoke test logs         | `pig-bg-tasks/target/…` via `cargo test`                                                                 |
+| Unit/smoke test logs         | `target/…` via `cargo test`                                                                 |
 
 Related: `RUST-PLAN.md` (phases, gates), `RUST-DECISION.md` (gate results,
 E13 persistence drop), `README.md` (the Go extension's acceptance history —

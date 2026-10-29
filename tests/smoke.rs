@@ -42,7 +42,7 @@ fn fixture() -> Option<Arc<Fixture>> {
         std::fs::create_dir_all(&logs).unwrap();
 
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ubin = manifest.join("../pig-tmp/shell-candidates/ubin");
+        let ubin = manifest.join("pig-tmp/shell-candidates/ubin");
         let host_path = std::env::var("PATH").unwrap_or_default();
         let path = if ubin.is_dir() {
             format!("{};{host_path}", ubin.to_string_lossy())
@@ -52,7 +52,7 @@ fn fixture() -> Option<Arc<Fixture>> {
         let busybox = std::env::var_os("PIG_TEST_BUSYBOX")
             .map(PathBuf::from)
             .or_else(|| {
-                let p = manifest.join("../pig-tmp/shell-candidates/busybox64.exe");
+                let p = manifest.join("pig-tmp/shell-candidates/busybox64.exe");
                 p.is_file().then_some(p)
             });
         if let Some(bb) = &busybox {
@@ -65,7 +65,7 @@ fn fixture() -> Option<Arc<Fixture>> {
 
 /// The native shell under test: `PIG_TEST_SHELL` → pig's `shellPath`-style
 /// default (brush.exe on this machine per the E3 decision) → configured →
-/// host resolution (only usable when it is NOT an MSYS engine).
+/// host resolution.
 fn native_shell() -> Option<String> {
     if let Ok(s) = std::env::var("PIG_TEST_SHELL") {
         if !s.is_empty() && PathBuf::from(&s).is_file() {
@@ -77,14 +77,10 @@ fn native_shell() -> Option<String> {
     if brush.is_file() {
         return Some(brush.to_string_lossy().into_owned());
     }
-    // fall back to host resolution only if it is native
+    // fall back to host resolution
     pig_bg_tasks::runner::shell::reset_shell_cache();
     pig_bg_tasks::runner::shell::set_configured_shell("");
-    let resolved = pig_bg_tasks::runner::shell::resolve().ok()?;
-    if pig_bg_tasks::runner::shell::is_msys_shell(&resolved) {
-        return None;
-    }
-    Some(resolved)
+    pig_bg_tasks::runner::shell::resolve().ok()
 }
 
 /// Run one script confined in the workspace, returning (exit, log body).
@@ -310,20 +306,6 @@ fn s11_busybox_userland_confined() {
     );
     assert_eq!(exit.code, 0, "{exit:?} body={body}");
     assert!(body.contains("S11_USERLAND_OK"), "{body}");
-}
-
-/// §4 fail-fast: an MSYS engine is rejected *before* spawn under confinement
-/// with an actionable message (instead of an in-container mxc#1061 death).
-#[test]
-fn s12_msys_engine_rejected_before_spawn() {
-    let err = pig_bg_tasks::runner::shell::ensure_confined_shell("C:\\Program Files\\Git\\bin\\bash.exe")
-        .expect_err("Git Bash must be rejected");
-    assert!(err.starts_with("SANDBOX_UNAVAILABLE: the resolved shell is an MSYS"), "{err}");
-    assert!(err.contains("shellPath") && err.contains("brush.exe"), "{err}");
-    // and the native engine passes
-    if let Some(f) = fixture() {
-        pig_bg_tasks::runner::shell::ensure_confined_shell(&f.shell).expect("native shell accepted");
-    }
 }
 
 /// Concurrency: several confined commands in parallel (separate containers —

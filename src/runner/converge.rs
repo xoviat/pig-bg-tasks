@@ -19,7 +19,7 @@
 //!
 //! What remains is bookkeeping the display surfaces need: an epoch counter
 //! (bumped on each distinct state — parity with the "epoch N" line) and the
-//! last desired/converged/error snapshot for `/sandbox` and `bg_debug`.
+//! last desired/converged/error snapshot for `/sandbox`.
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -100,7 +100,7 @@ impl Snap {
     }
 }
 
-/// Read-only view for `/sandbox` and `bg_debug`. No `pending`/`dirty`
+/// Read-only view for `/sandbox`. No `pending`/`dirty`
 /// fields: both were representations of the background thread's in-flight
 /// state and are impossible when convergence is synchronous.
 #[derive(Debug, Clone)]
@@ -222,7 +222,7 @@ impl Engine {
         }
     }
 
-    /// One line for `/sandbox` and `bg_debug`. Two arms remain of Go's
+    /// One line for `/sandbox`. Two arms remain of Go's
     /// five: FAILED (last validation error) and converged — `converging` /
     /// `converging to` / `… (pending)` described the background thread and
     /// cannot occur when convergence is synchronous.

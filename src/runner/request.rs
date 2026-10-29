@@ -12,8 +12,7 @@ use mxc_sdk::v1::{
 /// The userland applets dir (settings `userlandDir`, or the drop-in
 /// `<configHome>/agent/userland`), prepended to the child PATH in both
 /// confined and bare spawns. Busybox applets supply `sed`/`grep`/`awk`/… where
-/// the host's Git tools are MSYS and die under MXC (E3-bis) and brush has no
-/// built-in sed. Cached per process, like the configured shell.
+/// brush has no built-in sed. Cached per process, like the configured shell.
 static USERLAND: Mutex<String> = Mutex::new(String::new());
 
 fn g<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

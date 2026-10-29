@@ -18,7 +18,7 @@ intercepted. **Network is always allowed** (no isolation). Threat model: fat-fin
 non-malicious model — not adversarial isolation.
 
 **Platform status: Windows is implemented and accepted end-to-end** (MXC containment; gates E1–E10 +
-R11 in `RUST-DECISION.md`, smoke matrix 15/15, acceptance runs through real `pig -ne -e -p` sessions
+R11 in `RUST-DECISION.md`, smoke matrix 14/14, acceptance runs through real `pig -ne -e -p` sessions
 in `TESTING.md`). Linux (bwrap/landlock) and macOS (seatbelt) **runners** are deferred; the POSIX
 side of the runner is behind the same `Kind`/`Enforcement` seam. On non-Windows hosts confined calls
 fail closed with a message naming the deferral; `danger-full-access` still runs bare.
@@ -32,21 +32,22 @@ Windows deps are target-gated), so no isolation-layer fork was needed.
 ## Install / develop
 
 ```bash
-cargo test                            # 103 tests: 88 unit (bg/policy/runner/classify/escalate) + 15 smoke — single crate
+cargo test                            # 101 tests: 87 unit (bg/policy/runner/classify/escalate) + 14 smoke — single crate
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (rustup target add first)
-pig install ./pig-bg-tasks --validate-only --json   # cell build + registration check
-PIG_HOME=<scratch-home> pig -ne -e "$(pwd)/pig-bg-tasks" -p   # piped-prompt run
+pig install . --validate-only --json                # cell build + registration check
+PIG_HOME=<scratch-home> pig -ne -e "$(pwd)" -p      # piped-prompt run
 ```
 
 Rules that are easy to get wrong (full recipe: **`TESTING.md`**):
 
 - **The directory name is the extension identity** — a `-e <dir>` selection registers under the
   directory's name, and the factory registers `pig-bg-tasks`; a mismatch fails with
-  `register:name_mismatch`. Hence this workspace lives in `pig-bg-tasks/`.
+  `register:name_mismatch`. Hence the extension root is this directory itself — the repo root
+  `~/workspace/pig-bg-tasks` — with the crate's `Cargo.toml`, `src/` and `tests/` at the top level.
 - **`-ne` always** (skip ambient extensions — the npm/Go `pi-bg-tasks` has the same tool names) with
   an explicit `-e`.
 - **`pig-sdk` is never in `Cargo.toml`** (no `[patch]` either): pig resolves it at cell-build time
-  into its own state dir. `pig-bg-tasks/.cargo/config.toml` carries an absolute-path patch for plain
+  into its own state dir. `.cargo/config.toml` carries a path patch for plain
   `cargo` runs only — machine-local, never shipped.
 - **Freeze the tree during pig builds** (content-hash check) and warm the cell with
   `--validate-only` before timed piped runs (cold cell ≈ 9 min, warm ≈ 60 s).
@@ -55,10 +56,10 @@ Rules that are easy to get wrong (full recipe: **`TESTING.md`**):
 
 Two things are NOT bundled with the extension — install/point to them yourself:
 
-### 1. Bash engine — **brush** (required)
+### 1. Bash engine — **brush** (pinned for tests)
 
-Confined spawns refuse MSYS/Git-Bash engines (mxc#1061, fail-fast with an actionable
-`shellPath` hint), so the extension needs a native Win32 bash:
+Any bash reachable via pig's `shellPath` runs (Git Bash included); the engine
+tested and pinned throughout this repo is a native Win32 bash:
 
 - **Project**: [reubeno/brush](https://github.com/reubeno/brush) — "Bo(u)rne RUsty SHell";
   site/install docs: [brush.sh](https://brush.sh/getting-started/install/).
@@ -70,8 +71,7 @@ Confined spawns refuse MSYS/Git-Bash engines (mxc#1061, fail-fast with an action
 
 ### 2. Userland applets — **busybox-w32** (`sed`, `grep`, `awk`, …)
 
-Brush has no builtin `sed`, and host Git tools are MSYS and die inside the container — so
-external utilities come from BusyBox-w32 (native Win32, 179 applets in the build used here):
+Brush has no builtin `sed`, so external utilities come from BusyBox-w32 (native Win32, 179 applets in the build used here):
 
 - **Project**: [frippery.org/busybox](https://frippery.org/busybox/) (busybox-w32 by Ron
   Yorston); source mirrors: [GitHub rmyorston/busybox-w32](https://github.com/rmyorston/busybox-w32),
@@ -160,12 +160,11 @@ changes).
 Engine and userland come from pig **settings** (not `sandbox.json`):
 
 - `shellPath` — the bash engine (where to get it: **Prerequisites §1** — brush,
-  `cargo install brush`). Confined spawns **refuse MSYS/Git-Bash engines before spawn**
-  (mxc#1061: the MSYS object namespace is denied under MXC; no config works around it) with an
-  actionable hint: `cargo install brush` and point `shellPath` at `%USERPROFILE%\.cargo\bin\brush.exe`.
+  `cargo install brush`). The configured path wins over every fallback (PATH,
+  standard Git-for-Windows locations), so the engine is pinned exactly.
 - `userlandDir` — a busybox-applet directory (`sed`, `grep`, `awk`, `wc`, `find`, `sort`, …)
-  prepended to the child PATH in confined **and** bare spawns (host Git tools are MSYS and die under
-  MXC; brush has no built-in `sed`). Fallback: a drop-in `<configRoot>/agent/userland` directory.
+  prepended to the child PATH in confined **and** bare spawns (brush has no built-in
+  `sed`). Fallback: a drop-in `<configRoot>/agent/userland` directory.
   `bg_debug` shows the resolved `userland:` line. **Where the binaries come from and how `ubin/`
   is built: Prerequisites §2** (frippery.org busybox-w32). Shipping strategy for fresh installs is
   the one open sub-question (`RUST-PLAN.md` §10.7).
@@ -190,8 +189,8 @@ Non-zero exit + signature in the merged log tail ⇒ real denial →
 `access is denied`, `access to the path`, `permission denied`, `operation not permitted`,
 `write-protected`, `read-only file system`.
 
-Runner failures (command **never ran**) ⇒ `SANDBOX_UNAVAILABLE …` refusal: shell unresolvable, MSYS
-engine detected (fail-fast with the `shellPath` fix), or the container spawn itself failing. A
+Runner failures (command **never ran**) ⇒ `SANDBOX_UNAVAILABLE …` refusal: shell unresolvable, or the
+container spawn itself failing. A
 missing marker on a localized Windows is a classification gap, not a confinement failure.
 
 ## Windows runner — the MXC recipe
@@ -208,8 +207,8 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
 4. **Environment**: `inherit_default_environment` (E8: PATH requires it) + our entries: `LC_ALL`
    emptied, `LC_MESSAGES=C` (classification stability), userland PATH prepend; bare mode uses
    Go-parity `mergeEnv` semantics.
-5. **Engine**: external native Win32 bash pinned by settings `shellPath` (brush), MSYS fail-fast
-   pre-spawn; `timeout_ms=0` (extension timers govern); explicit `working_directory` (E8 quirk).
+5. **Engine**: bash pinned by settings `shellPath` (brush);
+   `timeout_ms=0` (extension timers govern); explicit `working_directory` (E8 quirk).
 6. **Tree kills**: every spawn joins a Job object with `KILL_ON_JOB_CLOSE` — `bg_stop`, session
    shutdown, and hard extension death take the whole tree (no SIGTERM on Windows: terminate is
    immediate).
@@ -221,9 +220,6 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
   the driver is not exposed to the container. Native tools otherwise run (E2 battery: cmd,
   PowerShell, curl/schannel, rustup…); use `powershell -NoProfile -Command "Start-Sleep N"` for long
   confined tasks. `ping` works in bare mode.
-- **MSYS engines cannot run inside the container** (mxc#1061, maintainer-confirmed) — this is why
-  `shellPath` must name a native engine; Git Bash is rejected *before* spawn, and userland applets
-  must be native (busybox), not Git's `/usr/bin`.
 - **No persistent containers (E13 drop)**: policy is rebuilt per spawn (~37 ms E8 baseline) instead
   of held for a session; the seam is retained for a future backend.
 - **POSIX is build-only, not run-ready**: the crate compiles and unit/smoke tests are portable, but
@@ -238,7 +234,7 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
 ## Divergences from the references (summary)
 
 - Native Win32 bash engine **external and settings-pinned** (brush via `shellPath`) instead of
-  in-process or PowerShell-only; MSYS engines refused up front instead of dying in-container.
+  in-process or PowerShell-only.
 - One composed `bash` tool; confinement is container policy, not command-text wrapping (no
   `unwrap.ts`).
 - Classification reads the **merged log tail**; confined spawns reach it through userspace pipe
@@ -253,11 +249,11 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
 ## Acceptance results (this machine, Windows 11)
 
 Full recipe, observed outputs, and traps: **`TESTING.md`**. Summary (all real pig runs,
-2026-10-25): `pig install ./pig-bg-tasks --validate-only --json` → `valid: true`,
+2026-10-25): `pig install . --validate-only --json` → `valid: true`,
 `registered: true`, `packable: true`, tools `[bash, bg_list, bg_output, bg_stop, bg_debug]`, commands
-`[bg, bg-tasks, sandbox]` ✓; `cargo test` 103/103 ✓ (smoke matrix 15/15 incl. confined
+`[bg, bg-tasks, sandbox]` ✓; `cargo test` 101/101 ✓ (smoke matrix 14/14 incl. confined
 echo, profile-write denial + classification, read-only denial, schannel HTTPS, busybox userland,
-MSYS fail-fast, parallel spawns, whole-tree kill, epoch bind); piped-prompt acceptance: confined
+parallel spawns, whole-tree kill, epoch bind); piped-prompt acceptance: confined
 `echo` (`HARNESS_OK`), userland `sed`/`grep`/`awk`/`wc` with `command -v sed` → `…\ubin\sed`,
 denial marker + escalation hint, headless escalation refusal (and the ignore-note branch), git
 clone+verify (`octocat/Hello-World`), bg lifecycle (start text, `Running (1)`, `bg_output` running,

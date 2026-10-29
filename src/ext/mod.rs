@@ -1,12 +1,11 @@
 //! The ext layer: registers everything the combined extension serves — ONE
-//! composed `bash` tool, the three task tools, `bg_debug`, the
+//! composed `bash` tool, the three task tools, the
 //! `/sandbox`-family commands (with completions), Ctrl+Shift+B, the
 //! `<task-notification>` renderer, steering auto-background, and session
 //! lifecycle (port of `extension.go`).
 
 pub mod bash;
 pub mod commands;
-pub mod debug;
 pub mod port;
 pub mod resolve;
 pub mod tasks;
@@ -34,9 +33,6 @@ pub fn build() -> Extension {
     ext.register_tool(tasks::bg_list_definition());
     ext.register_tool(tasks::bg_output_definition());
     ext.register_tool(tasks::bg_stop_definition());
-    // Agent-facing diagnostics: mode/grants/runner/shell/registry/trace —
-    // the agent inspects a live installed session without slash commands.
-    ext.register_tool(debug::debug_definition());
 
     // ── Commands / completions ───────────────────────────────────────
     ext.command("sandbox", commands::SANDBOX_DESC, commands::sandbox_handler);
@@ -121,11 +117,10 @@ pub fn build() -> Extension {
         crate::runner::shell::set_configured_shell(&configured);
         // Userland applets on the child PATH (E3-bis gap): settings'
         // `userlandDir` names a busybox-applet dir (sed/grep/awk/…), prepended
-        // in both confined and bare spawns — host Git tools are MSYS and die
-        // under MXC, and brush has no built-in sed. Fallback when the setting
+        // in both confined and bare spawns — brush has no built-in sed. Fallback when the setting
         // is absent: `<configHome>/agent/userland` if it exists (drop-in dir,
         // no settings edit needed). Both seams feed crate::runner::request's PATH
-        // prepend; see bg_debug's `userland:` line.
+        // prepend (seam: settings `userlandDir` or <configHome>/agent/userland).
         let settings_userland = ctx.get_settings().ok().and_then(|s| {
             s.get("userlandDir")
                 .and_then(Value::as_str)

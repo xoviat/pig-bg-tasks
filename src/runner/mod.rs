@@ -1,6 +1,6 @@
 //! MXC wrapper (plan §4/§5) — the only MXC-aware crate:
 //! - [`shell`]: `shellPath` resolution (settings win over PATH/standard
-//!   locations), WSL-alias skip, MSYS fail-fast under confinement;
+//!   locations), WSL-alias skip;
 //! - [`request`]: `ContainerRequest` build from the converged policy
 //!   (filesystem grants, network posture, UI, env, cwd, command-line
 //!   quoting);

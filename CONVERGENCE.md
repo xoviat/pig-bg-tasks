@@ -22,8 +22,7 @@ duration, never on another thread, never deferred.
   agree with the bound epoch.
 - **Causal fail-closed, no temporal timeout (preserved, strengthened).** Bind OK ⇒ build the
   `ContainerRequest` (write roots + read-only `C:\`, network allowed, UI on, `timeout_ms=0`) and
-  spawn. Bind/validate/refusal failed (workspace missing, runner unavailable, resolved engine is
-  MSYS per the mxc#1061 fail-fast) ⇒ the tool returns an error carrying the real cause — never
+  spawn. Bind/validate/refusal failed (workspace missing, runner unavailable) ⇒ the tool returns an error carrying the real cause — never
   half-applied, never bare. Spawn failure is `converge_failed`/`refused`-traced and surfaces
   `SANDBOX_UNAVAILABLE …` with the cause. The call duration still composes with background-task
   semantics (2 s quick-completion race, interactive timeout promotion, exactly-once completion

@@ -60,8 +60,7 @@ assertions that encode the old gaps must be inverted, see §6):
   `runner.SetConfiguredShell`) is the engine pin — on Windows users point it
   at the brush binary and install it with `cargo install brush`; the
   configured path wins over every fallback, so no PATH lookup and no
-  shadowing (rubash ships a `bash.exe` drop-in into `~/.cargo/bin`; Git Bash
-  is E3-dead under confinement anyway).
+  shadowing (rubash ships a `bash.exe` drop-in into `~/.cargo/bin`).
 
 Non-goals: network isolation (stays "always allowed"), write/edit fencing
 (stays in the permission-system extension), Linux/macOS runners (still
@@ -164,11 +163,8 @@ Mechanism mapping (old → new):
 | log handle fd-direct stdout | MXC streams via pipes ⇒ a Rust pump thread writes the log file (data path now in Rust; keep the 64 MiB cap + auto-kill and note the documented divergence: kernel-copy → userspace-copy) |
 | `internal/classify` signatures | kept verbatim + MXC runner-failure signatures added (`SANDBOX_UNAVAILABLE` path must cover MXC provision failures) |
 | `srt-win/SCHANNEL-GATE.md`, `GITBASH-GATE.md` | archived under `docs/evidence/` with a header pointing at the memo's gate results |
-| bash engine resolved on PATH (`bash.exe`/`rubash.exe`/busybox userland per the E3-bis decision) | **external brush binary pinned by pig's `shellPath`** (Go parity: `settings["shellPath"]` read at session start → `runner.SetConfiguredShell`; configured path wins over every fallback); install recipe `cargo install brush` (tested version pinned in the README); fallback chain (PATH, standard locations) kept for unconfined runs; under
-  confinement, a resolved shell that is MSYS/Git-Bash (or any known-E3-dead
-  engine) is rejected **before spawn** with an actionable error pointing at
-  `shellPath` → `brush.exe` — fail-fast instead of an in-container mxc#1061
-  death; userland stays busybox-w32 applets + native tools under a granted
+| bash engine resolved on PATH (`bash.exe`/`rubash.exe`/busybox userland per the E3-bis decision) | **external brush binary pinned by pig's `shellPath`** (Go parity: `settings["shellPath"]` read at session start → `runner.SetConfiguredShell`; configured path wins over every fallback); install recipe `cargo install brush` (tested version pinned in the README); fallback chain (PATH, standard locations) kept for unconfined runs;
+  userland stays busybox-w32 applets + native tools under a granted
   tool dir |
 | one `ContainerRequest` per command | **one `v1::spawn(ContainerRequest)` per bash task** (E13 outcome): ProcessContainer builds + tears down per spawn (E8-proven, 37 ms reference); the epoch's policy (fs readwrite/readonly sets, network allow, UI) rides the request per task; the `epoch → session, task → spawn-into-session` seam is retained in the runner interface so a future lifecycle+fs backend slots in without touching bg/policy/ext |
 
@@ -376,9 +372,8 @@ still fail the rewrite has not delivered):
    Validated through pig: `command -v sed` → `…\ubin\sed` and
    `sed`/`grep`/`awk`/`wc` all executed inside the workspace-write container
    (2026-10-25, `TESTING.md` §4 Observed). The original `sed`-gap reason for
-   keeping `shellPath` on Git Bash is closed — Git Bash itself still cannot
-   run under confinement (MSYS fail-fast stands), so point `shellPath` at
-   brush **together with** a `userlandDir`. Still open: how applets reach a
+   keeping `shellPath` on Git Bash is closed — whatever `shellPath` names,
+   pair it with a `userlandDir`. Still open: how applets reach a
    fresh install — bundle busybox resources in the extension vs
    auto-materialize into `<configHome>/agent/userland` vs document a manual
    copy (test hosts keep using `pig-tmp/shell-candidates/ubin`).
