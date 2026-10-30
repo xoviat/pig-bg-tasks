@@ -23,7 +23,32 @@ pub struct Config {
     pub extra_writable_dirs: Vec<String>,
 }
 
-/// Reference defaults (workspace-write, 5s probe, no extras).
+/// The default extra writable dirs, derived from the user's home — the user
+/// folder is never hardcoded:
+///
+/// - `<home>/go` — the default `GOPATH`/module cache (toolchains write here);
+/// - `<home>/AppData/Local/Packages` — per-app package data, including MXC's
+///   own confinement dirs (`sandbox.{…}`, `mxcprobe`), which confined spawns
+///   must be able to write.
+///
+/// Non-existing candidates are skipped silently (a machine without Go has no
+/// `~/go`); the result is canonical so it compares equal after resolution.
+pub fn default_extra_writable_dirs() -> Vec<String> {
+    let home = home_dir();
+    if home.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    [
+        home.join("go"),
+        home.join("AppData").join("Local").join("Packages"),
+    ]
+    .into_iter()
+    .filter(|p| p.is_dir())
+    .map(|p| crate::policy::canonical(&p.to_string_lossy()))
+    .collect()
+}
+
+/// Defaults: workspace-write, 5s probe, and the home-derived default extras.
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -31,7 +56,7 @@ impl Default for Config {
             runner_command: None,
             runner_failure_signatures: None,
             probe_timeout_ms: 5000,
-            extra_writable_dirs: Vec::new(),
+            extra_writable_dirs: default_extra_writable_dirs(),
         }
     }
 }
@@ -54,10 +79,15 @@ pub fn get(config_home: &str) -> Config {
             c = validate(map, &source, c);
         }
     }
-    // Resolve extra dirs: ~ expansion, absoluteness, existing directory,
-    // dedupe. Invalid entries are warned and dropped; dangerous entries
-    // (agent dir coverage) are KEPT with a warning.
-    c.extra_writable_dirs = resolve_extras(&c.extra_writable_dirs, &source, config_home);
+    // The home-derived defaults are ALWAYS granted (documented divergence
+    // from the reference, whose default list is empty); a configured
+    // `extraWritableDirs` adds to them. Defaults are existence-checked and
+    // canonical in `default_extra_writable_dirs`, so only file entries can
+    // produce warnings here. Invalid entries are warned and dropped;
+    // dangerous entries (agent dir coverage) are KEPT with a warning.
+    let mut entries = default_extra_writable_dirs();
+    entries.extend(c.extra_writable_dirs.iter().cloned());
+    c.extra_writable_dirs = resolve_extras(&entries, &source, config_home);
     *cache = Some(c.clone());
     c
 }
@@ -338,10 +368,62 @@ mod tests {
                 }),
             );
             let c = get(home);
-            // temp (canonicalized + dup) + home; relative + missing dropped
-            assert_eq!(c.extra_writable_dirs.len(), 2, "{:?}", c.extra_writable_dirs);
-            assert_eq!(c.extra_writable_dirs[0], crate::policy::canonical(&tmp));
-            assert_eq!(c.extra_writable_dirs[1], crate::policy::canonical(&home_dir().to_string_lossy()));
+            let d = default_extra_writable_dirs().len();
+            // defaults first, then temp (canonicalized + dup) + home;
+            // relative + missing dropped
+            assert_eq!(
+                c.extra_writable_dirs.len(),
+                d + 2,
+                "{:?}",
+                c.extra_writable_dirs
+            );
+            assert_eq!(
+                c.extra_writable_dirs[..d],
+                default_extra_writable_dirs()[..],
+                "defaults always come first"
+            );
+            assert_eq!(c.extra_writable_dirs[d], crate::policy::canonical(&tmp));
+            assert_eq!(
+                c.extra_writable_dirs[d + 1],
+                crate::policy::canonical(&home_dir().to_string_lossy())
+            );
         });
+    }
+
+    #[test]
+    fn defaults_merge_with_configured_extras() {
+        with_home("default-merge", &|home| {
+            let defaults = default_extra_writable_dirs();
+            assert!(!defaults.is_empty(), "test machine has ~/go or Packages");
+            let tmp = std::env::temp_dir().to_string_lossy().into_owned();
+            write(home, json!({"extraWritableDirs": [tmp.clone()]}));
+            let c = get(home);
+            // a configured list ADDS to the defaults; it cannot drop them
+            assert_eq!(c.extra_writable_dirs[..defaults.len()], defaults[..]);
+            assert!(
+                c.extra_writable_dirs.contains(&crate::policy::canonical(&tmp)),
+                "{:?}",
+                c.extra_writable_dirs
+            );
+            assert_eq!(c.extra_writable_dirs.len(), defaults.len() + 1);
+        });
+    }
+
+    #[test]
+    fn defaults_are_home_derived_and_existing_only() {
+        let d = default_extra_writable_dirs();
+        let home = home_dir().to_string_lossy().into_owned();
+        for e in &d {
+            assert!(e.starts_with(&home), "{e} is not under the user home");
+            assert!(std::path::Path::new(e).is_dir(), "{e}");
+            assert!(!e.contains('~'), "{e}: no unresolved ~");
+        }
+        // exactly the two candidates, when they exist
+        let go = crate::policy::canonical(&home_dir().join("go").to_string_lossy());
+        let pkgs = crate::policy::canonical(
+            &home_dir().join("AppData").join("Local").join("Packages").to_string_lossy(),
+        );
+        let want: Vec<String> = [go, pkgs].into_iter().filter(|p| std::path::Path::new(p).is_dir()).collect();
+        assert_eq!(d, want);
     }
 }

@@ -132,7 +132,7 @@ auto-kill; `session_start` sweeps logs older than 24 h; `session_shutdown` silen
 | mode | file effects (Windows, MXC per-spawn policy) |
 |---|---|
 | `read-only` | zero writable roots: writes denied everywhere (workspace, `%TEMP%` included); `C:\` readable |
-| `workspace-write` (default) | workspace + host `%TEMP%` + `extraWritableDirs` writable; `C:\` read-only; everything else denied on write |
+| `workspace-write` (default) | workspace + host `%TEMP%` + default home dirs (`~/go`, `~/AppData/Local/Packages`) + `extraWritableDirs` writable; `C:\` read-only; everything else denied on write |
 | `danger-full-access` | bare spawn (explicit escape hatch) — `runner: bypassed`, OS ACLs only |
 
 Mode switching is **`/sandbox [mode]`**: with no args it shows mode, writable set, resolved env,
@@ -156,6 +156,13 @@ is model-writable). Same schema as the reference: `mode`, `probeTimeoutMs` (defa
 dir are **warned but kept**), `runnerCommand`/`runnerFailureSignatures` (parsed for parity,
 **ignored** with a warning). Corrupt/missing ⇒ defaults. Read once per process (restart to pick up
 changes).
+
+**Default writable dirs** (documented divergence from the reference, whose list is empty): two
+home-derived extras are always granted in `workspace-write` — `~/go` (default `GOPATH`) and
+`~/AppData/Local/Packages` (per-app package data, including MXC's own `sandbox.{…}`/`mxcprobe`
+confinement dirs). The user folder is resolved at runtime (never hardcoded); a missing candidate
+(e.g. no `~/go`) is skipped silently, and a configured `extraWritableDirs` **adds** to these
+defaults rather than replacing them.
 
 Engine and userland come from pig **settings** (not `sandbox.json`):
 
