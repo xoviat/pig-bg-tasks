@@ -132,7 +132,7 @@ auto-kill; `session_start` sweeps logs older than 24 h; `session_shutdown` silen
 | mode | file effects (Windows, MXC per-spawn policy) |
 |---|---|
 | `read-only` | zero writable roots: writes denied everywhere (workspace, `%TEMP%` included); `C:\` readable |
-| `workspace-write` (default) | workspace + host `%TEMP%` + default home dirs (`~/go`, `~/AppData/Local/Packages`) + `extraWritableDirs` writable; `C:\` read-only; everything else denied on write |
+| `workspace-write` (default) | workspace + host `%TEMP%` + default home dirs (`~/go`, `~/AppData/Local/Packages`, `~/.cargo`, `~/.rustup`) + `extraWritableDirs` writable; `C:\` read-only; everything else denied on write |
 | `danger-full-access` | bare spawn (explicit escape hatch) — `runner: bypassed`, OS ACLs only |
 
 Mode switching is **`/sandbox [mode]`**: with no args it shows mode, writable set, resolved env,
@@ -157,12 +157,15 @@ dir are **warned but kept**), `runnerCommand`/`runnerFailureSignatures` (parsed 
 **ignored** with a warning). Corrupt/missing ⇒ defaults. Read once per process (restart to pick up
 changes).
 
-**Default writable dirs** (documented divergence from the reference, whose list is empty): two
-home-derived extras are always granted in `workspace-write` — `~/go` (default `GOPATH`) and
+**Default writable dirs** (documented divergence from the reference, whose list is empty): four
+home-derived extras are always granted in `workspace-write` — `~/go` (default `GOPATH`),
 `~/AppData/Local/Packages` (per-app package data, including MXC's own `sandbox.{…}`/`mxcprobe`
-confinement dirs). The user folder is resolved at runtime (never hardcoded); a missing candidate
-(e.g. no `~/go`) is skipped silently, and a configured `extraWritableDirs` **adds** to these
-defaults rather than replacing them.
+confinement dirs), `~/.cargo` (default `CARGO_HOME` — cargo's download cache `registry/cache`/`index`/`git`,
+the extracted crate dirs `registry/src`/`git/checkouts`, and `bin`, so sandboxed `cargo build` with
+dependencies works), and `~/.rustup` (default `RUSTUP_HOME` toolchain store, so toolchain/component
+resolution during a build stays in-sandbox). The user folder is resolved at runtime (never
+hardcoded); a missing candidate (e.g. no `~/go`) is skipped silently, and a configured
+`extraWritableDirs` **adds** to these defaults rather than replacing them.
 
 Engine and userland come from pig **settings** (not `sandbox.json`):
 

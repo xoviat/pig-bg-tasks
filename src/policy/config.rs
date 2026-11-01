@@ -29,7 +29,14 @@ pub struct Config {
 /// - `<home>/go` — the default `GOPATH`/module cache (toolchains write here);
 /// - `<home>/AppData/Local/Packages` — per-app package data, including MXC's
 ///   own confinement dirs (`sandbox.{…}`, `mxcprobe`), which confined spawns
-///   must be able to write.
+///   must be able to write;
+/// - `<home>/.cargo` — the default `CARGO_HOME`: cargo's download cache
+///   (`registry/cache`, `registry/index`, `git`) and the extracted crate dirs
+///   (`registry/src`, `git/checkouts`) plus `bin`, so a sandboxed `cargo build`
+///   with dependencies works without relocating the cache;
+/// - `<home>/.rustup` — the default `RUSTUP_HOME` (toolchain store), so
+///   `rustup`-pinned toolchains/components (on-demand install during a build)
+///   resolve in-sandbox too.
 ///
 /// Non-existing candidates are skipped silently (a machine without Go has no
 /// `~/go`); the result is canonical so it compares equal after resolution.
@@ -41,6 +48,8 @@ pub fn default_extra_writable_dirs() -> Vec<String> {
     [
         home.join("go"),
         home.join("AppData").join("Local").join("Packages"),
+        home.join(".cargo"),
+        home.join(".rustup"),
     ]
     .into_iter()
     .filter(|p| p.is_dir())
@@ -394,7 +403,10 @@ mod tests {
     fn defaults_merge_with_configured_extras() {
         with_home("default-merge", &|home| {
             let defaults = default_extra_writable_dirs();
-            assert!(!defaults.is_empty(), "test machine has ~/go or Packages");
+            assert!(
+                !defaults.is_empty(),
+                "test machine has ~/go, Packages, ~/.cargo or ~/.rustup"
+            );
             let tmp = std::env::temp_dir().to_string_lossy().into_owned();
             write(home, json!({"extraWritableDirs": [tmp.clone()]}));
             let c = get(home);
@@ -418,12 +430,17 @@ mod tests {
             assert!(std::path::Path::new(e).is_dir(), "{e}");
             assert!(!e.contains('~'), "{e}: no unresolved ~");
         }
-        // exactly the two candidates, when they exist
+        // exactly the four candidates, when they exist (same order)
         let go = crate::policy::canonical(&home_dir().join("go").to_string_lossy());
         let pkgs = crate::policy::canonical(
             &home_dir().join("AppData").join("Local").join("Packages").to_string_lossy(),
         );
-        let want: Vec<String> = [go, pkgs].into_iter().filter(|p| std::path::Path::new(p).is_dir()).collect();
+        let cargo = crate::policy::canonical(&home_dir().join(".cargo").to_string_lossy());
+        let rustup = crate::policy::canonical(&home_dir().join(".rustup").to_string_lossy());
+        let want: Vec<String> = [go, pkgs, cargo, rustup]
+            .into_iter()
+            .filter(|p| std::path::Path::new(p).is_dir())
+            .collect();
         assert_eq!(d, want);
     }
 }

@@ -21,7 +21,7 @@ use crate::ext::resolve::{config_for, escalation_notes, install_notifier, resolv
 
 pub const NO_WAIT_HINT: &str = "next_step: You will be automatically notified when it completes — do NOT wait, poll, or call bg_output to wait on it; continue with your current work.";
 
-const SANDBOX_NOTE: &str = "Sandbox: confined to the current mode; workspace-write already allows the workspace, %TEMP%, and the default home dirs (~/go, ~/AppData/Local/Packages). Unless retrying a denial, omit these fields or send JSON null.";
+const SANDBOX_NOTE: &str = "Sandbox: confined to the current mode; workspace-write already allows the workspace, %TEMP%, and the default home dirs (~/go, ~/AppData/Local/Packages, ~/.cargo, ~/.rustup). Unless retrying a denial, omit these fields or send JSON null.";
 
 const ENV_REDIRECT_GUIDELINE: &str = "Never work around the sandbox by relocating global cache/data directories into the workspace — no environment-variable overrides (XDG_CACHE_HOME, XDG_DATA_HOME, HOME, UV_CACHE_DIR, PIP_CACHE_DIR, npm_config_cache, PNPM_HOME, YARN_CACHE_FOLDER, CARGO_HOME, GOPATH, ...), no cache-relocating tool flags (--cache-dir, --store-dir, --cache), and no config files that do the same — unless the user explicitly asked for exactly that relocation. Run tools unmodified — including on the escalated retry: when their real global write is denied, retry that same call with escalation rather than adding a relocation.";
 
