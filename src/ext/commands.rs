@@ -55,7 +55,9 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
         return CommandResult::Ok;
     }
     // Non-blocking (and now literally synchronous): install the process-wide
-    // override, bump + converge the epoch, report.
+    // override, bump + converge the epoch, report. The convergence status
+    // line ("epoch N — converged: …") is not echoed here — `/sandbox` with
+    // no args still shows it.
     let mode = match arg {
         "read-only" => Mode::Readonly,
         "workspace-write" => Mode::WorkspaceWrite,
@@ -65,8 +67,7 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
     let epoch = Engine::shared().set_mode(mode);
     ctx.notify(
         &format!(
-            "sandbox: mode set to {arg} (process-wide) — epoch {epoch} converged; the next bash call runs under it.\n{}",
-            Engine::shared().status_line()
+            "sandbox: mode set to {arg} (process-wide) — epoch {epoch} converged; the next bash call runs under it."
         ),
         "info",
     );
