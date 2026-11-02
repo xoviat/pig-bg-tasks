@@ -213,7 +213,16 @@ fn build_spec(
     let mut spec = Spec {
         argv: vec![shell, "-c".to_string(), command.to_string()],
         cwd: cwd.to_string(),
-        env_extra: Vec::new(),
+        // gh-CLI fix: MXC blocks wincred in-container (ERROR_ACCESS_DENIED on
+        // every CredRead), so gh sends no token → 401. Inject GH_TOKEN (host
+        // env, else host-side keyring read) for workspace-write ONLY —
+        // read-only stays tokenless; danger-full-access runs bare where
+        // wincred works natively (no injection needed).
+        env_extra: if *mode == Mode::WorkspaceWrite {
+            crate::runner::creds::gh_token_env()
+        } else {
+            Vec::new()
+        },
         log_path: log_path.to_string(),
         request: None,
     };
@@ -224,7 +233,7 @@ fn build_spec(
         return Err(ErrUnavailable { detail: String::new() }.to_string());
     }
     let roots = crate::policy::writable_roots(*mode, &converged.workspace, &converged.extras);
-    spec.request = Some(request::build_request(&spec.argv, cwd, &[], &roots));
+    spec.request = Some(request::build_request(&spec.argv, cwd, &spec.env_extra, &roots));
     Ok(spec)
 }
 
@@ -440,5 +449,54 @@ fn output_or_no_output(output: &str) -> String {
         "(no output)".to_string()
     } else {
         output.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GH_TOKEN injection is scoped to workspace-write: read-only spawns
+    /// stay tokenless, and danger-full-access (bare) needs no injection
+    /// because wincred is readable outside the container.
+    #[test]
+    fn gh_token_injection_is_workspace_write_only() {
+        let _t =
+            crate::runner::creds::ENV_TEST_MU.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("GH_TOKEN", "gate-test-token");
+        let state = |mode: Mode| ConvergeState {
+            mode,
+            workspace: crate::policy::canonical(r"C:\ws"),
+            temp: std::env::temp_dir().to_string_lossy().into_owned(),
+            extras: vec![],
+        };
+        let build = |mode: Mode| {
+            build_spec(
+                &mode,
+                r"C:\ws",
+                "echo hi",
+                "gate-test.log",
+                &state(mode),
+            )
+            .expect("spec builds")
+        };
+
+        let ww = build(Mode::WorkspaceWrite);
+        assert_eq!(
+            ww.env_extra,
+            vec![("GH_TOKEN".to_string(), "gate-test-token".to_string())],
+            "workspace-write carries the token"
+        );
+
+        let ro = build(Mode::Readonly);
+        assert!(ro.env_extra.is_empty(), "read-only must stay tokenless");
+
+        let df = build(Mode::DangerFullAccess);
+        assert!(
+            df.env_extra.is_empty(),
+            "bare needs no injection (wincred works natively)"
+        );
+
+        std::env::remove_var("GH_TOKEN");
     }
 }

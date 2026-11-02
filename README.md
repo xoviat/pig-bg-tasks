@@ -216,7 +216,8 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
 3. **UI**: `disable=false` — console init needs win32k on this host (E8 quirk).
 4. **Environment**: `inherit_default_environment` (E8: PATH requires it) + our entries: `LC_ALL`
    emptied, `LC_MESSAGES=C` (classification stability), userland PATH prepend; bare mode uses
-   Go-parity `mergeEnv` semantics.
+   Go-parity `mergeEnv` semantics. **`GH_TOKEN` under `workspace-write` only** (`runner::creds`) —
+   the gh-CLI fix, see *Honest gaps*.
 5. **Engine**: bash pinned by settings `shellPath` (brush);
    `timeout_ms=0` (extension timers govern); explicit `working_directory` (E8 quirk).
 6. **Tree kills**: every spawn joins a Job object with `KILL_ON_JOB_CLOSE` — `bg_stop`, session
@@ -226,6 +227,17 @@ Per confined spawn (`runner::request::build_request` → `mxc_sdk::v1::spawn`), 
 ### Honest gaps (partial enforcement)
 
 - **Reads are unconfined by design** (broad `C:\` read rule; threat model is fat-finger writes).
+- **The Windows Credential Manager is blocked in-container** (measured, gh 2.82.1): `CredReadW` /
+  `CredEnumerateW` return `ERROR_ACCESS_DENIED` (5) for **every** target under MXC containment,
+  while the same calls succeed outside it. gh stores its token only in the keyring (`hosts.yml`
+  has no `oauth_token`), so `gh` inside a confined spawn sends no `Authorization` header → 401,
+  and `gh auth login` cannot repair it from inside either (the vault write is denied too).
+  `git credential fill` fails the same way (`Failed to enumerate credentials. [0x5]`). Mitigation
+  (`runner::creds`, **workspace-write only**): the spawn env gets `GH_TOKEN` — host env
+  `GH_TOKEN`/`GITHUB_TOKEN` first, else a host-side keyring read of `gh:github.com:<user>` (active
+  user from gh's `hosts.yml`; the pig host process is outside the container, where the vault is
+  readable). Read-only spawns stay tokenless; `danger-full-access` reads the vault natively. Not
+  injected when no token exists anywhere — pass-through, never fabrication.
 - **`ping` (ICMP) fails inside the container** — `Unable to contact IP driver. General failure.` —
   the driver is not exposed to the container. Native tools otherwise run (E2 battery: cmd,
   PowerShell, curl/schannel, rustup…); use `powershell -NoProfile -Command "Start-Sleep N"` for long

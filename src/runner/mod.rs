@@ -7,10 +7,13 @@
 //! - [`proc`]: one spawn — confined through `mxc_sdk::v1::spawn`, bare
 //!   (`danger-full-access`) through `std::process` + a KILL_ON_JOB_CLOSE job
 //!   object — implementing [`crate::bg::Handle`];
+//! - [`creds`]: `GH_TOKEN` pass-through for workspace-write spawns (the
+//!   gh-CLI fix — wincred is blocked in-container);
 //! - [`converge`]: the epoch engine (CONVERGENCE.md) — one background
 //!   thread, bind/wait, causal fail-closed, collapse on rapid flips.
 
 pub mod converge;
+pub mod creds;
 pub mod proc;
 pub mod request;
 pub mod shell;
