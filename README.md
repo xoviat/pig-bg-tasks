@@ -102,6 +102,42 @@ Brush has no builtin `sed`, so external utilities come from BusyBox-w32 (native 
   `command -v sed` inside a call confirm resolution. Extension-side auto-shipping is the one
   open sub-question (`RUST-PLAN.md` §10.7).
 
+### 3. Git Bash — patched runtime from <https://github.com/xoviat/cygwin>
+
+Any bash reachable via pig's `shellPath` runs, and the usual choice on Windows is **Git Bash**
+(Git for Windows, <https://gitforwindows.org/>). The **stock** `msys-2.0.dll`, however, fails
+inside the mxc ProcessContainer (AppContainer ACE, named-object namespace, pipe and fork failures —
+root-caused in the fork's [`STATUS.md`](https://github.com/xoviat/cygwin/blob/mxc/STATUS.md) and
+[`FORK_FAILURES.md`](https://github.com/xoviat/cygwin/blob/mxc/FORK_FAILURES.md)).
+
+**<https://github.com/xoviat/cygwin>** is the Cygwin/winsup fork carrying those fixes; its releases
+ship the patched runtime DLLs plus the installer. Install Git Bash patched for this sandbox:
+
+1. Install **Git for Windows** (<https://gitforwindows.org/>) — default root `C:\Program Files\Git`.
+2. Download `msys-2.0.dll`, `install.ps1` and `uninstall.ps1` from the latest release
+   (<https://github.com/xoviat/cygwin/releases>, currently **`v0.4.0`**, 2026-11-03; the
+   `cygwin1.dll` / `new-cygwin1.dll` assets are for a Cygwin tree, not needed for Git Bash) into
+   one directory.
+3. From an **elevated** PowerShell in that directory:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File install.ps1                    # default Git root
+   powershell -ExecutionPolicy Bypass -File install.ps1 -GitRoot 'D:\Git'  # non-default root
+   ```
+
+4. Point pig's `shellPath` (in `settings.json`, not `sandbox.json`) at that install's `bash.exe`.
+
+Notes:
+
+- The script swaps `{usr\bin,bin}\msys-2.0.dll` (originals kept as `msys-2.0.dll.stock`) **and**
+  opts every PE image in the install into ASLR — mandatory under mxc, whose force-relocation of
+  non-ASLR images breaks Cygwin's same-address fork (`0xC0000142`). `-SkipPeFlags` skips the sweep
+  (fine outside the sandbox, not inside it).
+- Safe to re-run as an update; `uninstall.ps1` reverts the DLL and the PE flags from the manifest.
+- Gate in the fork: `tools/final-verify.sh` → `RESULT: 14 passed, 0 failed` ("git bash works inside
+  the mxc sandbox"). Source builds go through `tools/ci/apply-to-msys.sh` → the pinned msys2-runtime
+  → `tools/ci/build-runtime-dll.sh`; the DLLs are also CI artifacts on every workflow run.
+
 ## Tools
 
 | tool | notes |
