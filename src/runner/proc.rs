@@ -18,12 +18,13 @@
 //! `MxcProcess::wait(&mut)` would hold the mutex for the process's whole
 //! lifetime and deadlock `bg_stop`'s concurrent `kill(&mut)`.
 //!
-//! **Cross-platform note (2026-10-25):** the `windows` crate and job-object
-//! machinery are `#[cfg(windows)]`-gated; on POSIX the bare backend kills the
-//! direct child only (no job = no grandchildren) — whole-tree kill on Unix
-//! lands with the deferred POSIX runner (process groups), see README
-//! "Honest gaps". mxc-sdk itself is cross-platform; confinement on POSIX is
-//! runtime-gated to `Kind::Unavailable` (fail-closed, danger allowed).
+//! **Cross-platform note:** the `windows` crate and job-object machinery are
+//! `#[cfg(windows)]`-gated. On Unix the bare backend puts the child in its
+//! own process group (`process_group(0)`) and `kill(-pgid, SIGKILL)` takes
+//! the whole tree — the POSIX analogue of KILL_ON_JOB_CLOSE. mxc-sdk is
+//! cross-platform: confinement goes through the host's `Containment::Process`
+//! backend (ProcessContainer on Windows, Bubblewrap on Linux, Seatbelt on
+//! macOS).
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -110,6 +111,12 @@ impl TaskHandle for Handle {
             },
             #[cfg(not(windows))]
             Inner::Bare { child } => {
+                // Whole tree: the child leads its own process group (see
+                // `start_bare`), so the negative pid reaches grandchildren;
+                // the direct-child kill is the fallback (group already gone).
+                unsafe {
+                    libc::kill(-(self.pid as i32), libc::SIGKILL);
+                }
                 let _ = g(child).kill();
             }
             Inner::Mxc { proc } => {
@@ -171,6 +178,14 @@ impl Handle {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::process::CommandExt;
+            // Own process group: kill(-pgid) in `Handle::kill` then takes the
+            // whole tree (grandchildren included) — the POSIX analogue of the
+            // Windows KILL_ON_JOB_CLOSE job.
+            cmd.process_group(0);
         }
         let child = cmd.spawn().map_err(|e| format!("proc: start: {e}"))?;
         let pid = child.id();
@@ -388,6 +403,69 @@ mod tests {
     /// lock (parallel runs cross-talked: observed flake).
     #[cfg(windows)]
     static PING_MU: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn bare_echo_writes_log_and_exit_zero_unix() {
+        let log = std::env::temp_dir().join("pi-proc-echo-unix.log");
+        let h = Handle::start(bare_spec(&["/bin/sh", "-c", "echo PROC_OK"], &log)).expect("spawn");
+        let e = h.wait();
+        assert_eq!(e.code, 0, "{e:?}");
+        assert!(!e.killed);
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(body.contains("PROC_OK"), "{body:?}");
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bare_exit_code_roundtrip_unix() {
+        let log = std::env::temp_dir().join("pi-proc-code-unix.log");
+        let h = Handle::start(bare_spec(&["/bin/sh", "-c", "exit 7"], &log)).expect("spawn");
+        let e = h.wait();
+        assert_eq!(e.code, 7, "{e:?}");
+        let _ = std::fs::remove_file(&log);
+    }
+
+    /// Whole-tree kill on Unix: `sh` backgrounds a `sleep` grandchild; the
+    /// kill must take the group (sh + sleep), and the group must be gone
+    /// afterwards (`kill(-pgid, 0)` → ESRCH), promptly, with a blocked
+    /// waiter returning — the bg_stop shape.
+    #[cfg(unix)]
+    #[test]
+    fn kill_takes_whole_tree_unix() {
+        let log = std::env::temp_dir().join("pi-proc-kill-unix.log");
+        let h =
+            Handle::start(bare_spec(&["/bin/sh", "-c", "sleep 30 & wait"], &log)).expect("spawn");
+        let pid = h.pid();
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(h.try_wait().is_none(), "still running");
+
+        let t = std::time::Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let e = h.wait();
+                assert!(e.killed, "waiter: {e:?}");
+            });
+            std::thread::sleep(Duration::from_millis(300));
+            h.kill();
+        });
+        let e = h.wait();
+        assert!(e.killed, "{e:?}");
+        assert!(t.elapsed() < Duration::from_secs(5), "kill+wait too slow");
+
+        // no leftovers: the group (grandchild included) must disappear
+        let mut gone = unsafe { libc::kill(-(pid as i32), 0) } != 0;
+        for _ in 0..50 {
+            if gone {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            gone = unsafe { libc::kill(-(pid as i32), 0) } != 0;
+        }
+        assert!(gone, "process group {pid} still alive after kill");
+        let _ = std::fs::remove_file(&log);
+    }
 
     #[cfg(windows)]
     #[test]

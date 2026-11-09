@@ -23,15 +23,21 @@ via `mxc-sdk` 1.0.1 on crates.io) instead of running bare.
 intercepted. **Network is always allowed** (no isolation). Threat model: fat-finger protection for a
 non-malicious model — not adversarial isolation.
 
-**Platform status: Windows is implemented and accepted end-to-end** (gates E1–E10 + R11 in
-`RUST-DECISION.md`, smoke matrix 14/14, acceptance runs in `TESTING.md`). Linux/macOS runners are
-deferred: off-Windows, confined calls fail closed with a message naming the deferral;
-`danger-full-access` still runs bare.
+**Platform status: Windows, Linux and macOS.** The sandbox is mxc everywhere — the same
+`Containment::Process` request resolves per host to ProcessContainer (Windows), Bubblewrap (Linux)
+or Seatbelt (macOS) — and the bare path is platform-native (job-object tree kill on Windows,
+process-group kill on Unix; Git Bash on Windows, `bash` on PATH elsewhere). **Windows is the
+runtime-tested platform** (gates E1–E10 + R11 in `RUST-DECISION.md`, smoke matrix 14/14,
+acceptance runs in `TESTING.md`); **Linux/macOS are verified by inspection** — the cross-target
+gate `cargo check --target x86_64-unknown-linux-gnu --all-targets` is clean, and the smoke matrix
+self-skips where the host lacks a shell or the mxc backend (Linux: `bwrap` on PATH) instead of
+failing.
 
 ## Install / develop
 
 ```bash
-cargo test                            # 101 tests: 87 unit + 14 smoke — single crate
+cargo test                            # 115 tests: 101 unit + 14 smoke — single crate
+cargo check --target x86_64-unknown-linux-gnu --all-targets   # Unix compile gate (rustup target add first)
 pig install . --validate-only --json                # cell build + registration check
 PIG_HOME=<scratch-home> pig -ne -e "$(pwd)" -p      # piped-prompt run
 ```
@@ -78,11 +84,11 @@ orphans, even on hard extension death).
 
 ### Permission modes
 
-| mode | file effects (Windows, mxc per-spawn policy) |
+| mode | file effects (mxc per-spawn policy) |
 |---|---|
-| `read-only` | zero writable roots: writes denied everywhere (workspace, `%TEMP%` included); `C:\` readable |
-| `workspace-write` (default) | workspace + host `%TEMP%` + default home dirs (`~/go`, `~/AppData/Local/Packages`, `~/.cargo`, `~/.rustup`) + `extraWritableDirs` writable; `C:\` read-only; everything else denied on write |
-| `danger-full-access` | bare spawn (explicit escape hatch) — `runner: bypassed`, OS ACLs only |
+| `read-only` | zero writable roots: writes denied everywhere (workspace, temp dir included); the system root (`C:\` / `/`) readable |
+| `workspace-write` (default) | workspace + host temp dir (`%TEMP%` / `$TMPDIR`) + default home dirs (`~/go`, `~/.cargo`, `~/.rustup`, plus `~/AppData/Local/Packages` on Windows) + `extraWritableDirs` writable; system root read-only; everything else denied on write |
+| `danger-full-access` | bare spawn (explicit escape hatch) — `runner: bypassed`, OS permissions only |
 
 Mode switching is **`/sandbox [mode]`**: with no args it shows the mode, the writable set, resolved
 env, epoch and runner status; switching installs the process-wide override and bumps an epoch — the
@@ -91,21 +97,25 @@ next bash call binds it synchronously.
 ### Per-spawn confinement through mxc
 
 Each confined spawn builds its own `ContainerRequest` (`runner::request::build_request` →
-`mxc_sdk::v1::spawn`) and starts a **fresh mxc ProcessContainer** — there is no long-lived sandbox:
+`mxc_sdk::v1::spawn`) and starts a **fresh mxc container** — ProcessContainer on Windows,
+Bubblewrap on Linux, Seatbelt on macOS; there is no long-lived sandbox:
 
-1. **Filesystem**: `readwrite_paths` = the converged write roots, `readonly_paths` = `C:\`,
-   `denied` empty, `clear_policy_on_exit`.
+1. **Filesystem**: `readwrite_paths` = the converged write roots, `readonly_paths` = the system
+   root (`C:\` on Windows, `/` on Unix), `denied` empty, `clear_policy_on_exit`.
 2. **Network**: egress + ingress + host loopback allowed (posture: no network isolation).
-3. **UI**: `disable=false` — console init needs win32k on this host.
+3. **UI**: `disable=false` — no UI restriction (Windows console init needs win32k; a no-op
+   elsewhere).
 4. **Environment**: inherits the default env, plus `LC_ALL` emptied / `LC_MESSAGES=C` (stable denial
    classification) and the resolved PATH; `GH_TOKEN` is injected in `workspace-write` only
    (see *Known limits*).
-5. **Engine**: the shell resolved from pig's `shellPath` setting (then `$SHELL`, the standard Git
-   for Windows locations, and `bash` on PATH — see [Git Bash](#why-git-bash-needs-a-patch));
+5. **Engine**: the shell resolved from pig's `shellPath` setting — configured path first on every
+   host, then per platform: Windows `$SHELL` → Git for Windows → `bash` on PATH; Unix `bash` on
+   PATH → `/bin/bash` → `$SHELL` (see [Git Bash](#why-git-bash-needs-a-patch));
    `timeout_ms=0`, so the extension's own timers govern.
-6. **Tree kill**: every spawn joins a Windows Job object with `KILL_ON_JOB_CLOSE` — `bg_stop`,
-   session shutdown, and hard extension death take the whole tree (terminate on Windows is
-   immediate; no SIGTERM).
+6. **Tree kill**: bare spawns join a Windows Job object (`KILL_ON_JOB_CLOSE`) or a Unix process
+   group (`kill(-pgid)`) — `bg_stop`, session shutdown, and hard extension death take the whole
+   tree; confined spawns die through the mxc process handle (Windows terminate is immediate; no
+   SIGTERM).
 
 ### No standing grants (per-call convergence)
 
@@ -147,28 +157,37 @@ expanded, must exist, warned+dropped if invalid). Corrupt/missing ⇒ defaults. 
 `sandbox.json`.
 
 **Default writable dirs** in `workspace-write`: four home-derived extras beyond workspace and
-`%TEMP%` — `~/go` (default `GOPATH`), `~/AppData/Local/Packages` (per-app package data, including
-mxc's own confinement dirs), `~/.cargo` (`CARGO_HOME`: registry caches, extracted crates, `bin` —
+the host temp dir — `~/go` (default `GOPATH`), `~/AppData/Local/Packages` (per-app package data,
+including mxc's own confinement dirs; Windows-only candidate, absent elsewhere and skipped),
+`~/.cargo` (`CARGO_HOME`: registry caches, extracted crates, `bin` —
 so sandboxed `cargo build` works) and `~/.rustup` (toolchain store). The user folder is resolved at
 runtime (never hardcoded); a missing candidate is skipped silently, and `extraWritableDirs` **adds**
 to these defaults rather than replacing them.
 
 ### Known limits (partial enforcement)
 
-- **Reads are unconfined by design** (broad `C:\` read rule; the threat model is fat-finger writes).
+- **Reads are unconfined by design** (broad system-root read rule; the threat model is fat-finger
+  writes).
 - **The Windows Credential Manager is blocked inside the container**: `CredReadW`/
   `CredEnumerateW` return `ERROR_ACCESS_DENIED` for every target, so `gh` (whose token lives only
   in the keyring) sends no `Authorization` header → 401, and `git credential fill` fails too.
   Mitigation: `workspace-write` spawns get `GH_TOKEN` in their env (host `GH_TOKEN`/`GITHUB_TOKEN`
   first, else a host-side keyring read — the pig host process is outside the container, where the
-  vault is readable). Read-only spawns stay tokenless; nothing is fabricated when no token exists.
-- **`ping` (ICMP) fails in-container** (`Unable to contact IP driver`); native tools otherwise run.
-  Use `powershell -NoProfile -Command "Start-Sleep N"` for long confined tasks.
+  vault is readable; on Unix gh's plaintext `hosts.yml` token is honored the same way). Read-only
+  spawns stay tokenless; nothing is fabricated when no token exists.
+- **`ping` (ICMP) fails in the Windows container** (`Unable to contact IP driver` — the driver is
+  not exposed to the AppContainer); native tools otherwise run. Use
+  `powershell -NoProfile -Command "Start-Sleep N"` for long confined tasks there.
 - **No persistent containers**: policy is rebuilt per spawn instead of held for a session.
-- **POSIX runners are deferred** (build-only; confined path fails closed off-Windows) and denial
-  classification is English-only.
+- **Confinement needs the host's mxc backend present**: Windows ships it, macOS has Seatbelt
+  built in, Linux needs `bwrap` on PATH (Bubblewrap). A missing/broken backend fails closed with
+  the backend's own cause (`SANDBOX_UNAVAILABLE …`), never bare; the smoke matrix self-skips on
+  such a host. Denial classification is English-only.
 
 ## Why Git Bash needs a patch
+
+*Windows-only story: on Linux/macOS the shell is native `bash` and the Bubblewrap/Seatbelt
+backends do not share the MSYS runtime — no patch, nothing to install.*
 
 Git Bash (Git for Windows, <https://gitforwindows.org/>) is the usual shell for this extension —
 but it is a **Cygwin/MSYS runtime**: bash and every child it forks share `msys-2.0.dll`'s

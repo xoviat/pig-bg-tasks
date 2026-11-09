@@ -142,14 +142,27 @@ mod tests {
 
     #[test]
     fn canonical_and_clean() {
-        // existing path → canonical (no \\?\ prefix thanks to dunce)
-        let c = canonical("C:\\Windows\\.");
-        assert!(!c.contains("\\\\?\\"), "{c}");
-        assert!(c.ends_with('\\') || c.eq_ignore_ascii_case("c:\\windows"), "{c}");
-        // nonexistent → lexical clean
-        let n = canonical("C:\\no\\such\\dir\\..\\..\\x");
-        assert!(!n.contains(".."), "{n}");
-        assert!(n.replace('/', "\\").ends_with("\\x"), "{n}");
+        if cfg!(windows) {
+            // existing path → canonical (no \\?\ prefix thanks to dunce)
+            let c = canonical("C:\\Windows\\.");
+            assert!(!c.contains("\\\\?\\"), "{c}");
+            assert!(c.ends_with('\\') || c.eq_ignore_ascii_case("c:\\windows"), "{c}");
+            // nonexistent → lexical clean
+            let n = canonical("C:\\no\\such\\dir\\..\\..\\x");
+            assert!(!n.contains(".."), "{n}");
+            assert!(n.replace('/', "\\").ends_with("\\x"), "{n}");
+        } else {
+            // existing path → canonical (symlinks resolved, no prefix games)
+            let t = std::env::temp_dir();
+            let c = canonical(&t.join(".").to_string_lossy());
+            assert!(!c.contains("\\\\?\\"), "{c}");
+            assert!(std::path::Path::new(&c).is_dir(), "{c}");
+            assert!(!c.contains(".."), "{c}");
+            // nonexistent → lexical clean (filepath.Clean shape)
+            let n = canonical("/no/such/dir/../../x");
+            assert!(!n.contains(".."), "{n}");
+            assert!(n.ends_with("/x"), "{n}");
+        }
     }
 
     #[test]

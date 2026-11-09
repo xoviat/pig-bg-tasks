@@ -28,10 +28,16 @@ pig-sdk = "0.1.0"
 
 # Windows-only: job-object tree kills + CREATE_NO_WINDOW. Everything else
 # (incl. mxc-sdk — its own windows deps are target-gated upstream) builds on
-# any platform; the POSIX runner is deferred (runtime Kind::Unavailable).
+# any platform: on Unix the confined path goes through mxc's native backend
+# (Bubblewrap on Linux, Seatbelt on macOS) and the bare path kills the whole
+# process group via libc.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+# Unix-only: whole-tree kill for the bare backend (kill(-pgid)).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

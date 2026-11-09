@@ -1,8 +1,12 @@
 //! Port of `internal/runner`'s shell resolution — parity with pi core's
-//! documented order: the configured `shellPath` setting first, then `$SHELL`,
-//! then the standard Git for Windows locations, then `bash` on PATH — with
-//! WSL launcher aliases skipped on PATH unless configured explicitly, so bare
-//! commands never land in WSL by surprise. Cached per process.
+//! documented order, adapted per host: the configured `shellPath` setting
+//! first on every platform; on Windows `$SHELL`, the standard Git for
+//! Windows locations, then `bash` on PATH; on Unix `bash` on PATH first
+//! (this tool's payloads are bash scripts — a non-bash `$SHELL` must not
+//! silently become the engine), the fixed `/bin`/`/usr/local/bin` locations,
+//! then `$SHELL` last. WSL launcher aliases are skipped on PATH unless
+//! configured explicitly, so bare commands never land in WSL by surprise.
+//! Cached per process.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -30,7 +34,7 @@ pub fn configured_shell() -> String {
     g(&CONFIGURED).clone()
 }
 
-/// Find the bash to run (cached; parity order above).
+/// Find the bash to run (cached; per-host order above).
 pub fn resolve() -> Result<String, String> {
     if let Some(p) = g(&RESOLVED).clone() {
         return Ok(p);
@@ -42,31 +46,47 @@ pub fn resolve() -> Result<String, String> {
         // would be skipped below is honored when named in settings.
         candidates.push(configured.clone());
     }
-    if let Ok(s) = std::env::var("SHELL") {
-        if !s.is_empty() {
-            candidates.push(s);
+    if cfg!(windows) {
+        if let Ok(s) = std::env::var("SHELL") {
+            if !s.is_empty() {
+                candidates.push(s);
+            }
         }
-    }
-    // Git for Windows standard locations BEFORE PATH, so a PATH hit can
-    // never shadow Git Bash.
-    let prog_files =
-        std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
-    let local = std::env::var("LocalAppData").unwrap_or_default();
-    for base in [prog_files.as_str(), local.as_str()] {
-        if base.is_empty() {
-            continue;
+        // Git for Windows standard locations BEFORE PATH, so a PATH hit can
+        // never shadow Git Bash.
+        let prog_files =
+            std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+        let local = std::env::var("LocalAppData").unwrap_or_default();
+        for base in [prog_files.as_str(), local.as_str()] {
+            if base.is_empty() {
+                continue;
+            }
+            for rel in [
+                "Git\\bin\\bash.exe",
+                "Git\\usr\\bin\\bash.exe",
+                "Git\\mingw64\\bin\\bash.exe",
+            ] {
+                candidates.push(format!("{base}\\{rel}"));
+            }
         }
-        for rel in [
-            "Git\\bin\\bash.exe",
-            "Git\\usr\\bin\\bash.exe",
-            "Git\\mingw64\\bin\\bash.exe",
-        ] {
-            candidates.push(format!("{base}\\{rel}"));
+        if let Some(p) = look_path("bash") {
+            if !is_wsl_alias(&p) {
+                candidates.push(p);
+            }
         }
-    }
-    if let Some(p) = look_path("bash") {
-        if !is_wsl_alias(&p) {
-            candidates.push(p);
+    } else {
+        if let Some(p) = look_path("bash") {
+            if !is_wsl_alias(&p) {
+                candidates.push(p);
+            }
+        }
+        for fixed in ["/bin/bash", "/usr/local/bin/bash"] {
+            candidates.push(fixed.to_string());
+        }
+        if let Ok(s) = std::env::var("SHELL") {
+            if !s.is_empty() {
+                candidates.push(s);
+            }
         }
     }
     for c in candidates {
@@ -82,33 +102,58 @@ pub fn resolve() -> Result<String, String> {
     Err(ERR_SHELL_UNAVAILABLE.to_string())
 }
 
-/// `exec.LookPath("bash")` (PATHEXT-aware, PATH-only).
+/// `exec.LookPath("bash")` (PATH-only; PATHEXT-aware on Windows, executable
+/// bit required on Unix).
 fn look_path(name: &str) -> Option<String> {
     let path = std::env::var("PATH").ok()?;
-    let exts: Vec<String> = std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
-        .split(';')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    for dir in std::env::split_paths(&path) {
-        let base = dir.join(name);
-        if base.is_file() {
-            return Some(base.to_string_lossy().into_owned());
-        }
-        for ext in &exts {
-            let cand = dir.join(format!("{name}{ext}"));
-            if cand.is_file() {
-                return Some(cand.to_string_lossy().into_owned());
+    #[cfg(windows)]
+    {
+        let exts: Vec<String> = std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        for dir in std::env::split_paths(&path) {
+            let base = dir.join(name);
+            if base.is_file() {
+                return Some(base.to_string_lossy().into_owned());
             }
-            // case-insensitive ext on Windows filesystems is free; try lower
-            let cand = dir.join(format!("{name}{}", ext.to_lowercase()));
-            if cand.is_file() {
-                return Some(cand.to_string_lossy().into_owned());
+            for ext in &exts {
+                let cand = dir.join(format!("{name}{ext}"));
+                if cand.is_file() {
+                    return Some(cand.to_string_lossy().into_owned());
+                }
+                // case-insensitive ext on Windows filesystems is free; try lower
+                let cand = dir.join(format!("{name}{}", ext.to_lowercase()));
+                if cand.is_file() {
+                    return Some(cand.to_string_lossy().into_owned());
+                }
             }
         }
+        None
     }
-    None
+    #[cfg(not(windows))]
+    {
+        for dir in std::env::split_paths(&path) {
+            let base = dir.join(name);
+            if is_executable_file(&base) {
+                return Some(base.to_string_lossy().into_owned());
+            }
+        }
+        None
+    }
+}
+
+/// Unix: a PATH hit must be an executable file (the shell is spawned
+/// directly, so a non-executable `bash` would fail at spawn).
+#[cfg(not(windows))]
+fn is_executable_file(p: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    p.is_file()
+        && p.metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
 }
 
 /// WSL launcher that would silently run commands inside a WSL distro.
@@ -140,7 +185,7 @@ mod tests {
         std::fs::write(&exe, b"MZ").unwrap();
         set_configured_shell(&exe.to_string_lossy());
         let got = resolve().unwrap();
-        assert!(got.to_lowercase().ends_with("\\brush.exe"), "{got}");
+        assert!(got.replace('\\', "/").ends_with("brush.exe"), "{got}");
         assert!(!got.contains("\\\\?\\"), "no verbatim prefix in shell paths: {got}");
         // a configured-but-missing path falls through to the next candidate
         // (Go parity: candidates are stat-gated)

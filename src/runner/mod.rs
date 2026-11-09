@@ -5,8 +5,9 @@
 //!   (filesystem grants, network posture, UI, env, cwd, command-line
 //!   quoting);
 //! - [`proc`]: one spawn — confined through `mxc_sdk::v1::spawn`, bare
-//!   (`danger-full-access`) through `std::process` + a KILL_ON_JOB_CLOSE job
-//!   object — implementing [`crate::bg::Handle`];
+//!   (`danger-full-access`) through `std::process` + a tree-kill handle
+//!   (KILL_ON_JOB_CLOSE job object on Windows, process group on Unix) —
+//!   implementing [`crate::bg::Handle`];
 //! - [`creds`]: `GH_TOKEN` pass-through for workspace-write spawns (the
 //!   gh-CLI fix — wincred is blocked in-container);
 //! - [`converge`]: the epoch engine (CONVERGENCE.md) — one background
@@ -24,6 +25,9 @@ use crate::policy::Mode;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     WindowsAcl,
+    /// mxc's native backend on Unix: Bubblewrap on Linux, Seatbelt on macOS
+    /// (mxc `Containment::Process` resolves per host OS).
+    Posix,
     Unavailable,
 }
 
@@ -31,13 +35,22 @@ impl Kind {
     pub fn as_str(&self) -> &'static str {
         match self {
             Kind::WindowsAcl => "windows-acl",
+            Kind::Posix => {
+                if cfg!(target_os = "linux") {
+                    "bwrap"
+                } else if cfg!(target_os = "macos") {
+                    "seatbelt"
+                } else {
+                    "posix"
+                }
+            }
             Kind::Unavailable => "unavailable",
         }
     }
 }
 
-/// `windows-acl` is always "partial" (structural gaps: NTFS hard-link
-/// aliasing, unconfined reads, standing grants) — honest docs.
+/// `windows-acl`/`bwrap`/`seatbelt` are always "partial" (structural gaps:
+/// NTFS hard-link aliasing, unconfined reads, standing grants) — honest docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Enforcement {
     Full,
@@ -78,8 +91,7 @@ impl std::fmt::Display for ErrUnavailable {
             write!(
                 f,
                 "SANDBOX_UNAVAILABLE: no usable sandbox runner on this host; the command was NOT \
-                 executed. Linux/macOS runners are deferred in this build — set mode \
-                 \"danger-full-access\" explicitly to run unconfined."
+                 executed. Set mode \"danger-full-access\" explicitly to run unconfined."
             )
         }
     }
@@ -89,17 +101,21 @@ impl std::error::Error for ErrUnavailable {}
 
 /// Shell could not be resolved (parity message).
 pub const ERR_SHELL_UNAVAILABLE: &str =
-    "bash shell could not be resolved (set shellPath semantics: PATH, then standard Git for Windows locations)";
+    "bash shell could not be resolved (shellPath, then PATH, then the standard shell locations)";
 
 fn chain_verdict() -> Selected {
+    // Availability is "resolve a shell" on every platform (resolveability,
+    // never spawn). Confinement itself is mxc's per-host `Containment::Process`
+    // selection — ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt
+    // (macOS) — and if the host lacks the backend (e.g. `bwrap` off PATH) the
+    // spawn fails with the backend's real cause, fail-closed.
+    if shell::resolve().is_err() {
+        return Selected { kind: Kind::Unavailable, enforcement: Enforcement::Full };
+    }
     if cfg!(windows) {
-        if shell::resolve().is_err() {
-            return Selected { kind: Kind::Unavailable, enforcement: Enforcement::Full };
-        }
         Selected { kind: Kind::WindowsAcl, enforcement: Enforcement::Partial }
     } else {
-        // Deferred: Linux (bwrap/landlock) and macOS (seatbelt).
-        Selected { kind: Kind::Unavailable, enforcement: Enforcement::Full }
+        Selected { kind: Kind::Posix, enforcement: Enforcement::Partial }
     }
 }
 
@@ -124,7 +140,7 @@ pub fn describe(sel: Selected, effective: Mode) -> String {
         return "bypassed (danger-full-access)".to_string();
     }
     if sel.kind == Kind::Unavailable {
-        return "unavailable (fail-closed: confined commands will be refused; Linux/macOS runners deferred)"
+        return "unavailable (fail-closed: confined commands will be refused; no usable runner on this host)"
             .to_string();
     }
     format!("{} ({} enforcement)", sel.kind.as_str(), sel.enforcement.as_str())
@@ -153,5 +169,19 @@ mod tests {
             e.to_string(),
             "SANDBOX_UNAVAILABLE: sandbox runner failed before the command ran: shell missing"
         );
+    }
+
+    #[test]
+    fn kind_names_follow_the_host_backend() {
+        // /sandbox renders the backend that actually confines on this OS.
+        if cfg!(target_os = "linux") {
+            assert_eq!(Kind::Posix.as_str(), "bwrap");
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(Kind::Posix.as_str(), "seatbelt");
+        } else {
+            assert_eq!(Kind::Posix.as_str(), "posix");
+        }
+        assert_eq!(Kind::WindowsAcl.as_str(), "windows-acl");
+        assert_eq!(Kind::Unavailable.as_str(), "unavailable");
     }
 }

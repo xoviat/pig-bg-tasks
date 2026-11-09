@@ -27,8 +27,9 @@
 //! `workspace-write`. Read-only spawns stay tokenless, and
 //! `danger-full-access` runs bare where wincred is readable natively.
 //!
-//! Non-Windows: env vars only (the POSIX runner is runtime-unavailable
-//! anyway; keyring formats differ per platform).
+//! Non-Windows: env vars first, then gh's plaintext `hosts.yml` token
+//! (the keyring read is wincred-only — other platforms' keyrings are out
+//! of scope here).
 
 use std::sync::Mutex;
 
@@ -110,13 +111,30 @@ fn keyring_token() -> Option<String> {
     None
 }
 
-/// `%APPDATA%\GitHub CLI\hosts.yml` (gh's global config; absent is normal).
+/// gh's global config (`hosts.yml`), absent is normal: Windows
+/// `%APPDATA%\GitHub CLI\hosts.yml`; Unix `$XDG_CONFIG_HOME/hosts.yml`
+/// (default `~/.config/hosts.yml`).
 fn read_hosts_yml() -> Option<String> {
-    let appdata = std::env::var_os("APPDATA")?;
-    let path = std::path::Path::new(&appdata)
-        .join("GitHub CLI")
-        .join("hosts.yml");
-    std::fs::read_to_string(path).ok()
+    std::fs::read_to_string(hosts_yml_path()?).ok()
+}
+
+fn hosts_yml_path() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        Some(std::path::Path::new(&appdata).join("GitHub CLI").join("hosts.yml"))
+    }
+    #[cfg(not(windows))]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let home = std::env::var_os("HOME")?;
+                Some(std::path::PathBuf::from(home).join(".config"))
+            })?;
+        Some(base.join("hosts.yml"))
+    }
 }
 
 /// The active user and inline `oauth_token` for `host` in a `hosts.yml`

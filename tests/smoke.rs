@@ -4,9 +4,12 @@
 //!
 //! Sections translate the Go smoke suite's spawn/confine/write/deny themes
 //! plus §6's *inverted* assertions (profile write now denied, schannel now
-//! succeeds). Needs this machine's shell facts (E3 decision): a native
-//! Win32 shell (`shellPath`-style brush.exe) and busybox-w32 applets as the
-//! userland — both overridable via env for other hosts.
+//! succeeds). Machine-class claims: the matrix needs a usable shell
+//! (`PIG_TEST_SHELL`, brush.exe on Windows, `bash` elsewhere) and — on
+//! non-Windows hosts — a working mxc backend (Bubblewrap needs `bwrap` on
+//! PATH; Seatbelt ships with macOS), probed once; without either the sections
+//! skip with a notice instead of failing. Windows-only sections (schannel,
+//! busybox fixtures) skip themselves elsewhere.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -24,10 +27,13 @@ struct Fixture {
     logs: PathBuf,
     /// Native shell (`brush.exe` by default).
     shell: String,
-    /// `ubin;host PATH` — busybox applets first (E3-bis userland).
+    /// `ubin<sep>host PATH` — busybox applets first (E3-bis userland).
     path: String,
     /// busybox source for `sleep.exe` (tree-kill fixture), if present.
     busybox: Option<PathBuf>,
+    /// What `s14` runs to have a killable grandchild: the copied `sleep.exe`
+    /// on Windows (from `busybox`), a native `sleep` elsewhere.
+    sleeper: Option<String>,
 }
 
 fn fixture() -> Option<Arc<Fixture>> {
@@ -44,8 +50,9 @@ fn fixture() -> Option<Arc<Fixture>> {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let ubin = manifest.join("pig-tmp/shell-candidates/ubin");
         let host_path = std::env::var("PATH").unwrap_or_default();
+        let sep = pig_bg_tasks::runner::request::PATH_SEP;
         let path = if ubin.is_dir() {
-            format!("{};{host_path}", ubin.to_string_lossy())
+            format!("{}{sep}{}", ubin.to_string_lossy(), host_path)
         } else {
             host_path
         };
@@ -58,24 +65,98 @@ fn fixture() -> Option<Arc<Fixture>> {
         if let Some(bb) = &busybox {
             let _ = std::fs::copy(bb, ws.join("sleep.exe"));
         }
-        Some(Arc::new(Fixture { ws, logs, shell, path, busybox }))
+        let sleeper = if cfg!(windows) {
+            busybox
+                .as_ref()
+                .map(|_| ws.join("sleep.exe").to_string_lossy().into_owned())
+        } else {
+            look_path_exec("sleep")
+        };
+        let f = Arc::new(Fixture { ws, logs, shell, path, busybox, sleeper });
+        // Non-Windows: prove the host can actually confine first (mxc →
+        // Bubblewrap needs `bwrap` on PATH) — otherwise the matrix skips like
+        // any other missing machine capability. Windows keeps its historical
+        // behavior: no probe, a broken mxc is a loud failure there.
+        if !cfg!(windows) && !confined_probe(&f) {
+            eprintln!(
+                "smoke: no working confined runner on this host (mxc backend missing?) — section skipped"
+            );
+            return None;
+        }
+        Some(f)
     })
     .clone()
 }
 
+/// PATH lookup for an executable file (Unix sleeper fixture).
+#[cfg(not(windows))]
+fn look_path_exec(name: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = std::env::var("PATH").ok()?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|p| {
+            p.is_file()
+                && p.metadata().map(|m| m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+        })
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(windows)]
+fn look_path_exec(_name: &str) -> Option<String> {
+    None
+}
+
+/// One confined echo: green only when the host's mxc backend spawns and runs
+/// it (covers a missing `bwrap`, a broken sandbox, a wrong shell, …).
+fn confined_probe(f: &Fixture) -> bool {
+    let argv = vec![f.shell.clone(), "-c".to_string(), "echo PROBE_OK".to_string()];
+    let roots =
+        pig_bg_tasks::policy::writable_roots(Mode::WorkspaceWrite, &f.ws.to_string_lossy(), &[]);
+    let req =
+        pig_bg_tasks::runner::request::build_request(&argv, &f.ws.to_string_lossy(), &[], &roots);
+    let log = f.logs.join("probe.log");
+    let spec = pig_bg_tasks::runner::proc::Spec {
+        argv,
+        cwd: f.ws.to_string_lossy().into_owned(),
+        env_extra: vec![],
+        log_path: log.to_string_lossy().into_owned(),
+        request: Some(req),
+    };
+    match pig_bg_tasks::runner::proc::Handle::start(spec) {
+        Ok(h) => {
+            let exit = h.wait();
+            let body = std::fs::read_to_string(&log).unwrap_or_default();
+            exit.code == 0 && body.contains("PROBE_OK")
+        }
+        Err(_) => false,
+    }
+}
+
+/// The user home for the outside-write fixtures (s03/s05): `USERPROFILE` on
+/// Windows, `HOME` on Unix.
+fn user_home() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+}
+
 /// The native shell under test: `PIG_TEST_SHELL` → pig's `shellPath`-style
-/// default (brush.exe on this machine per the E3 decision) → configured →
-/// host resolution.
+/// default (brush.exe on Windows per the E3 decision) → host resolution
+/// (Git Bash on Windows, `bash` on Unix).
 fn native_shell() -> Option<String> {
     if let Ok(s) = std::env::var("PIG_TEST_SHELL") {
         if !s.is_empty() && PathBuf::from(&s).is_file() {
             return Some(s);
         }
     }
-    let home = std::env::var("USERPROFILE").ok()?;
-    let brush = PathBuf::from(&home).join(".cargo").join("bin").join("brush.exe");
-    if brush.is_file() {
-        return Some(brush.to_string_lossy().into_owned());
+    #[cfg(windows)]
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let brush = PathBuf::from(&home).join(".cargo").join("bin").join("brush.exe");
+        if brush.is_file() {
+            return Some(brush.to_string_lossy().into_owned());
+        }
     }
     // fall back to host resolution
     pig_bg_tasks::runner::shell::reset_shell_cache();
@@ -125,7 +206,7 @@ fn skip_or_get() -> Option<Arc<Fixture>> {
     match fixture() {
         Some(f) => Some(f),
         None => {
-            eprintln!("smoke: no native Win32 shell on this host — section skipped");
+            eprintln!("smoke: no usable shell/runner on this host — section skipped");
             None
         }
     }
@@ -162,8 +243,11 @@ fn s02_workspace_write_and_read_back() {
 #[test]
 fn s03_profile_write_denied_and_classified() {
     let Some(f) = skip_or_get() else { return };
-    let home = std::env::var("USERPROFILE").expect("USERPROFILE");
-    let target = PathBuf::from(&home).join("pi-smoke-s03-should-not-exist.txt");
+    let Some(home) = user_home() else {
+        eprintln!("smoke: no user home on this host — section skipped");
+        return;
+    };
+    let target = home.join("pi-smoke-s03-should-not-exist.txt");
     let _ = std::fs::remove_file(&target);
     // the redirect IS the last command — its failure must be the exit code
     let script = format!("echo x > \"{}\"", target.display());
@@ -197,8 +281,11 @@ fn s04_read_only_denies_workspace_write() {
 #[test]
 fn s05_danger_bare_writes_outside() {
     let Some(f) = skip_or_get() else { return };
-    let home = std::env::var("USERPROFILE").expect("USERPROFILE");
-    let target = PathBuf::from(&home).join("pi-smoke-s05-bare.txt");
+    let Some(home) = user_home() else {
+        eprintln!("smoke: no user home on this host — section skipped");
+        return;
+    };
+    let target = home.join("pi-smoke-s05-bare.txt");
     let _ = std::fs::remove_file(&target);
     let argv = vec![
         f.shell.clone(),
@@ -227,8 +314,11 @@ fn s05_danger_bare_writes_outside() {
 #[test]
 fn s06_ambient_system_read() {
     let Some(f) = skip_or_get() else { return };
-    let hosts = "C:\\Windows\\System32\\drivers\\etc\\hosts";
-    let script = format!("test -f \"{hosts}\" && echo S06_READ_OK");
+    #[cfg(windows)]
+    let system_file = "C:\\Windows\\System32\\drivers\\etc\\hosts";
+    #[cfg(not(windows))]
+    let system_file = "/etc/hosts";
+    let script = format!("test -f \"{system_file}\" && echo S06_READ_OK");
     let (exit, body) = confined(&f, "s06", &script, Mode::WorkspaceWrite);
     assert_eq!(exit.code, 0, "{exit:?} body={body}");
     assert!(body.contains("S06_READ_OK"), "{body}");
@@ -255,10 +345,9 @@ fn s08_cwd_is_explicit() {
     std::fs::create_dir_all(&sub).unwrap();
     let (exit, body) = confined_in(&f, "s08", "pwd && echo PWD_OK", Mode::WorkspaceWrite, &sub);
     assert_eq!(exit.code, 0, "{exit:?} body={body}");
-    // brush prints the path with forward slashes
-    let normalized = body.replace('/', "\\");
+    // path separators differ per platform; the leaf name must appear either way
     assert!(
-        normalized.to_lowercase().contains("s08-sub"),
+        body.to_lowercase().contains("s08-sub"),
         "cwd must be the explicit working_directory: {body}"
     );
     let _ = std::fs::remove_dir_all(&sub);
@@ -273,7 +362,9 @@ fn s09_exit_code_roundtrip_confined() {
 
 /// §9: sspiprobe's schannel check as a permanent regression test — confined
 /// HTTPS through the native schannel client must succeed (E2 inverted
-/// assertion: today's Go build documents this as broken).
+/// assertion: today's Go build documents this as broken). Windows-only claim
+/// (schannel is the Windows TLS stack).
+#[cfg(windows)]
 #[test]
 fn s10_schannel_https_under_confinement() {
     let Some(f) = skip_or_get() else { return };
@@ -334,12 +425,11 @@ fn s13_parallel_confined_spawns() {
 #[test]
 fn s14_confined_kill() {
     let Some(f) = skip_or_get() else { return };
-    if f.busybox.is_none() {
-        eprintln!("smoke: busybox source missing — section skipped");
+    let Some(sleeper) = f.sleeper.clone() else {
+        eprintln!("smoke: no sleeper binary on this host — section skipped");
         return;
-    }
-    let sleep_exe = f.ws.join("sleep.exe");
-    let argv = vec![f.shell.clone(), "-c".to_string(), format!("\"{}\" 30", sleep_exe.display())];
+    };
+    let argv = vec![f.shell.clone(), "-c".to_string(), format!("\"{sleeper}\" 30")];
     let roots = pig_bg_tasks::policy::writable_roots(Mode::WorkspaceWrite, &f.ws.to_string_lossy(), &[]);
     let req = pig_bg_tasks::runner::request::build_request(
         &argv,

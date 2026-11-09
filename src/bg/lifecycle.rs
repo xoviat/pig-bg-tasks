@@ -285,10 +285,14 @@ mod tests {
     fn helpers_match_reference_wording() {
         let r = Registry::new();
         assert!(assert_job_slot(&r).is_ok());
-        assert!(require_existing_cwd("C:\\").is_ok());
+        // platform-neutral: an existing dir (temp) and a missing one
+        let existing = std::env::temp_dir().to_string_lossy().into_owned();
+        assert!(require_existing_cwd(&existing).is_ok());
+        let missing =
+            std::env::temp_dir().join("pi-lifecycle-no-such-dir").to_string_lossy().into_owned();
         assert_eq!(
-            require_existing_cwd("C:\\definitely\\missing\\dir").unwrap_err(),
-            "Working directory does not exist: C:\\definitely\\missing\\dir"
+            require_existing_cwd(&missing).unwrap_err(),
+            format!("Working directory does not exist: {missing}")
         );
         assert!(is_blank_command("  \n\t"));
         assert!(!is_blank_command("x"));
