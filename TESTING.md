@@ -1,12 +1,14 @@
-# Testing the Rust extension (repo root)
+# Testing the Rust extension (repository root = npm Package)
 
-The extension directory **must be named `pig-bg-tasks`** — that is this
-repository's root, where the crate's `Cargo.toml`, `src/` and `tests/` live:
-a direct `-e`
+The extension root **must be named `pig-bg-tasks`** — it is
+`extensions/pig-bg-tasks/` in this repository, where the crate's `Cargo.toml`,
+`src/` and `tests/` live: a direct `-e`
 directory selection takes the _directory_ as the extension identity
 (`extensions.md`), and runtime registration is `Extension::new("pig-bg-tasks")`
-— a mismatch fails with `register:name_mismatch`. The Go extension's repo
-root carries the same name for the same reason.
+— a mismatch fails with `register:name_mismatch`. The repository root is the
+npm Package (`package.json`, `pi.extensions: ["extensions/*"]`, npm name
+`pig-bg-tasks`), so the Package-selected identity matches too. The Go
+extension's repo root carries the same name for the same reason.
 
 Every test of the _extension itself_ runs **through pig** — pig owns Rust
 extension builds: it generates the runner, stages the matching SDK under the
@@ -16,7 +18,9 @@ extension builds into a content-addressed runtime cell"). Plain `cargo build`
 cannot resolve the root package — `pig-sdk = "0.1.0"` is not on crates.io —
 and that is by design (E7-verified; no `[patch]` belongs in `Cargo.toml`).
 
-All commands below run from the repository root. Scratch lives under
+Unless noted, commands below run from the repository root (the npm Package);
+`cargo` runs and the `-e` / `preview-login` selections use
+`extensions/pig-bg-tasks/`. Scratch lives under
 `pig-tmp/` (gitignored).
 
 ## 1. Isolated pig home
@@ -50,7 +54,7 @@ appear: `sdk-<hash>`, `sdk-py-<hash>`, `sdk-rs-<hash>`).
 ## 2. Load ONLY the Rust extension — always `-ne`
 
 ```bash
-PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)" …
+PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)/extensions/pig-bg-tasks" …
 ```
 
 `pig -ne` is `--no-extensions`: _"Skip discovered, configured, and built-in
@@ -85,7 +89,7 @@ produced.
 
 ```bash
 printf '%s\n' "Run: echo HARNESS_OK — use the bash tool and reply with its exact output." \
-  | PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)" -p \
+  | PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)/extensions/pig-bg-tasks" -p \
   > pig-tmp/smoke-rs-harness.log 2>&1
 ```
 
@@ -104,7 +108,7 @@ Print-mode facts (`cli-integration.md`):
 - PiG auto-selects print mode when stdin/stdout is not a terminal, so a pipe
   alone is enough.
 
-This is the README's acceptance pattern (`pig -ne -e ./ -p`, 30 s caps,
+This is the README's acceptance pattern (`pig -ne -e ./extensions/pig-bg-tasks -p`, 30 s caps,
 logs `pig-tmp/smoke-*.log`): confined `echo`, workspace write+read, outside
 write denied + denial marker + escalation hint, headless escalation refusal,
 read-only denies workspace, `bg_list`/`bg_output`/`bg_stop`, `<task-notification>`
@@ -184,7 +188,7 @@ driver. General failure.` exit 1 (native tool runs; the driver refuses).
 ## 5. `session_start` without a model session
 
 ```bash
-PIG_HOME="$PIG_HOME" pig extension preview-login "$(pwd)"
+PIG_HOME="$PIG_HOME" pig extension preview-login "$(pwd)/extensions/pig-bg-tasks"
 ```
 
 "Start exactly one extension and render the login set during `session_start`;
@@ -195,14 +199,17 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cargo test                                 # repo root, single crate: 87 unit tests + 14 smoke tests (101 total)
+cargo test                                 # extensions/pig-bg-tasks, single crate: 87 unit tests + 14 smoke tests (101 total)
 rustup target add x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
     # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean
 ```
 
-`pig-sdk` resolution for plain cargo comes from `.cargo/config.toml`,
-which carries an **absolute-path** `[patch.crates-io]` to the staged SDK.
+`pig-sdk` resolution for plain cargo comes from the repository root's
+`.cargo/config.toml`, which carries a `[patch.crates-io]` to the staged SDK
+(`../../.pig/state/pigsdk/sdk-rs-<hash>`, resolved against the `.cargo` config
+root — the repository root — so the crate's home under `extensions/` does not
+change it; a `~` form does not work, Cargo does not expand `~`).
 It is deliberately a _config file_, not a `Cargo.toml` patch: pig copies
 sources into its cell, where a relative manifest patch would resolve to the
 wrong place (and pig resolves the dependency itself at build time anyway).
@@ -237,12 +244,14 @@ cached; start again to build the current source`. Freeze the tree, run,
 - The scratch settings copied from the real home may list `packages`
   (including the Go pig-bg-tasks package). `-ne` skips them — one more reason
   never to drop `-ne`.
-- **`.cargo/config.toml`'s `pig-sdk` patch path must be ABSOLUTE.** Cargo does
-  not expand `~`: if the file shows a `~/.pig/state/pigsdk/…` form (observed
+- **`.cargo/config.toml`'s `pig-sdk` patch path must resolve from the
+  repository root, and Cargo does not expand `~`.** If the file shows a
+  `~/.pig/state/pigsdk/…` form (observed
   2026-10-25 rewritten mid-session, mtime traced to a pig run window — some
   staging step normalizes it), plain cargo fails with
   `failed to read <workspace>\pig-bg-tasks\~\.pig\… (os error 3)`. Restore
-  `path = "%USERPROFILE%/.pig/state/pigsdk/sdk-rs-<hash>"` (the dir must
+  `path = "../../.pig/state/pigsdk/sdk-rs-<hash>"` (relative to the
+  repository root — the `.cargo` config root — or absolute; the dir must
   exist under `%USERPROFILE%\.pig\state\pigsdk\`). Pig's own cell builds are
   unaffected — they resolve the SDK themselves.
 - **Run `cargo test` outside a pig sandbox (observed 2026-10-29).** Under
@@ -260,7 +269,7 @@ cached; start again to build the current source`. Freeze the tree, run,
 | Model config (copied)        | `$PIG_HOME/agent/{settings,auth,models,models-store}.*`                                                  |
 | Print-mode run logs          | `pig-tmp/smoke-rs-*.log` (stderr half has tool traffic)                                                  |
 | Task logs / trace            | `%TEMP%\pi-bg-tasks\*.log`, `%TEMP%\pi-bg-tasks\bash-calls.jsonl` (also surfaced by the `bg_debug` tool) |
-| Unit/smoke test logs         | `target/…` via `cargo test`                                                                 |
+| Unit/smoke test logs         | `extensions/pig-bg-tasks/target/…` via `cargo test`                                          |
 
 Related: `RUST-PLAN.md` (phases, gates), `RUST-DECISION.md` (gate results,
 E13 persistence drop), `README.md` (the Go extension's acceptance history —

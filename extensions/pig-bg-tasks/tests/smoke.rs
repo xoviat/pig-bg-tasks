@@ -47,8 +47,10 @@ fn fixture() -> Option<Arc<Fixture>> {
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::create_dir_all(&logs).unwrap();
 
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ubin = manifest.join("pig-tmp/shell-candidates/ubin");
+        // The crate lives in `extensions/<name>/`; the `pig-tmp/` fixtures
+        // stay at the repository root.
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let ubin = repo_root.join("pig-tmp/shell-candidates/ubin");
         let host_path = std::env::var("PATH").unwrap_or_default();
         let sep = pig_bg_tasks::runner::request::PATH_SEP;
         let path = if ubin.is_dir() {
@@ -59,7 +61,7 @@ fn fixture() -> Option<Arc<Fixture>> {
         let busybox = std::env::var_os("PIG_TEST_BUSYBOX")
             .map(PathBuf::from)
             .or_else(|| {
-                let p = manifest.join("pig-tmp/shell-candidates/busybox64.exe");
+                let p = repo_root.join("pig-tmp/shell-candidates/busybox64.exe");
                 p.is_file().then_some(p)
             });
         if let Some(bb) = &busybox {

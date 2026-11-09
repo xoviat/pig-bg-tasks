@@ -36,18 +36,28 @@ failing.
 ## Install / develop
 
 ```bash
+# users — install the Package from npm (first use builds a runtime cell,
+# which needs a Cargo/Rust toolchain on the machine):
+pig install npm:pig-bg-tasks
+
+# from the repository root (the npm Package):
+pig install . --validate-only --json                # cell build + registration check
+PIG_HOME=<scratch-home> pig -ne -e "$(pwd)/extensions/pig-bg-tasks" -p   # piped-prompt run
+
+# plain cargo — run inside the crate:
+cd extensions/pig-bg-tasks
 cargo test                            # 115 tests: 101 unit + 14 smoke — single crate
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # Unix compile gate (rustup target add first)
-pig install . --validate-only --json                # cell build + registration check
-PIG_HOME=<scratch-home> pig -ne -e "$(pwd)" -p      # piped-prompt run
 ```
 
 Rules that are easy to get wrong (full recipe: **`TESTING.md`**):
 
-- **The directory name is the extension identity** — a `-e <dir>` selection registers under the
-  directory's name, and the factory registers `pig-bg-tasks`; a mismatch fails with
-  `register:name_mismatch`. Hence the extension root is this directory itself, with the crate's
-  `Cargo.toml`, `src/` and `tests/` at the top level.
+- **The extension root is `extensions/pig-bg-tasks/`, and its directory name is the extension
+  identity** — a `-e <dir>` selection registers under the directory's name, and the factory
+  registers `pig-bg-tasks`; a mismatch fails with `register:name_mismatch`. The crate's
+  `Cargo.toml`, `src/` and `tests/` live there. This repository root is the npm **Package**
+  (`package.json` with `pi.extensions: ["extensions/*"]`), and its npm name is `pig-bg-tasks`
+  too, so the Package-selected identity matches as well.
 - **`-ne` always** (skip ambient extensions — npm `pi-bg-tasks` registers the same tool names) with
   an explicit `-e`.
 - **`pig-sdk` is never in `Cargo.toml`** (no `[patch]` either): pig resolves it at cell-build time
@@ -239,4 +249,4 @@ Notes:
 
 ## License
 
-MIT (ported sources MIT; see upstream packages).
+MIT — see [`LICENSE`](LICENSE) (ported sources MIT; see upstream packages).
