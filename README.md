@@ -70,7 +70,7 @@ Rules that are easy to get wrong (full recipe: **`TESTING.md`**):
 
 | tool | notes |
 |---|---|
-| `bash` | composed: sandbox params (`sandbox_permissions`, `justification`) + bg params (`run_in_background`, `timeout`, `description`). Denial-first escalation. 2 s quick-completion window (then live streaming); timeout auto-background (default 120 s) is **interactive-only** — in print/RPC the command runs out. |
+| `bash` | composed: sandbox params (`sandbox_permissions`, `justification`) + bg params (`run_in_background`, `timeout`, `description`). Denial-first escalation. 2 s quick-completion window (then live streaming); timeout auto-background (default 45 s) is **interactive-only** — in print/RPC the command runs out. |
 | `bg_list` | running first, then recent terminal (lazy eviction of notified jobs). |
 | `bg_output` | meta + last 32 KiB + log path; latches the completion notification. |
 | `bg_stop` | Job-object terminate (whole tree) + bounded wait; latches silently first, returns real outcome. |

@@ -31,7 +31,7 @@ pub use registry::{BackgroundReason, ForegroundSlot, Job, JobStatus, Registry};
 use std::sync::{Mutex, MutexGuard};
 
 // Constants — parity with the reference's types.ts / bg.go.
-pub const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+pub const DEFAULT_TIMEOUT_MS: u64 = 45_000;
 pub const QUICK_COMPLETION_MS: u64 = 2_000;
 pub const OUTPUT_PREVIEW_CHARS: usize = 12_000;
 pub const TASK_OUTPUT_TAIL_CHARS: usize = 32 * 1024;
