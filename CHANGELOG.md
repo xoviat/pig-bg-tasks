@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.1] - 2026-11-21
+
+- **One socket per session, in the OS temp dir** (`DELEGATED-WORKSPACES.md` §B): the link's
+  endpoint is now `<osTempDir>/pig-sandbox-<sessionId>.sock` — a single socket instead of the old
+  config-root primary plus temp-dir fallback, so parent and child derive the same path from
+  knowledge they already share (a config root that differs between the two no longer matters;
+  `config_root` left the link API entirely). Everything that crosses the link rides that one
+  socket: the `policy` fetch, the `ask` relay, and the new `policy-update` push below.
+- **Permission-level changes propagate to children**: a child that fetches `op:"policy"` (or asks)
+  is registered with its parent, and `/sandbox` — the one place a session's level widens or
+  narrows — pushes the parent's live policy down every registered child's socket
+  (`{"v":1,"op":"policy-update","parent":…,"policy":{mode, workspace, temp, extras}}`).
+  Detached and best-effort: a child that is gone is traced and never delays the switch. The child's
+  applier (`inherit::apply_update`) replaces its mirrored baseline in **both** directions and only
+  when the frame names the session it mirrors — a foreign sender, an unknown mode or no mirror at
+  all leaves the mirror untouched — and replies `applied`, which is what the parent traces. The
+  child's next tool call converges under the new level, so grandchildren follow on the next hop.
+- Tests: +3 (single-socket endpoint derivation, the fan-out over two sockets, `apply_update`'s
+  both-directions baseline move) — 118 unit + 14 smoke green.
+
 ## [0.3.0] - 2026-11-20
 
 - **Delegated-workspace parent link** (`DELEGATED-WORKSPACES.md` §B): one AF_UNIX socket per

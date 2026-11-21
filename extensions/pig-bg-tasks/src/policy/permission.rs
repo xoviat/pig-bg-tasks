@@ -2,6 +2,12 @@
 //! `/sandbox`. One PiG extension process serves every session, so a static IS
 //! the process-wide singleton the reference needed `globalThis` for. The
 //! override applies on the next tool call in every session.
+//!
+//! A level change is not local to this session: delegated children mirror
+//! this session's policy, so whoever changes it must also call
+//! [`crate::link::server::broadcast_policy`] (the `/sandbox` handler does,
+//! right after [`set`]) or the children keep running the level they
+//! fetched at their `session_start`.
 
 use std::sync::Mutex;
 

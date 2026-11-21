@@ -12,10 +12,17 @@
 //!   mirror, not a union) — same machine, same config, so it is normally
 //!   identical anyway; when it differs, the parent is authoritative.
 //!
-//! Nothing here dials the socket: [`crate::link::client::fetch_policy`]
-//! does that at `session_start`; an unreachable parent simply leaves this
-//! empty and the child keeps its local policy (it never *widens* by being
-//! unreachable).
+//! The mirror is not a one-shot read: whenever the parent widens or
+//! narrows its permission level, the parent pushes the new snapshot over
+//! the same socket (`op:"policy-update"`) and [`apply_update`] moves this
+//! baseline to it — both directions, but only for the session that
+//! spawned this child.
+//!
+//! Nothing here *dials* the socket: [`crate::link::client::fetch_policy`]
+//! does that at `session_start`, and the push arrives on this session's
+//! own listener — an unreachable parent simply leaves the mirror empty (or
+//! at its last known value) and the child keeps that policy (it never
+//! *widens* by being unreachable).
 
 use std::sync::Mutex;
 
@@ -49,6 +56,44 @@ pub fn get() -> Option<Inherited> {
 /// Drop the mirrored policy (session shutdown).
 pub fn clear() {
     *lock() = None;
+}
+
+/// Apply a policy pushed over the parent link (`op:"policy-update"`): the
+/// sender must be the session this child mirrors — anyone else's frame is
+/// refused (fail-closed) — and the snapshot replaces the baseline, so a
+/// parent's **widened or narrowed** level reaches a child that mirrored
+/// it at its `session_start`.
+///
+/// Returns whether it applied. No mirror, a foreign sender, or an unknown
+/// mode leaves the mirror untouched (`false`), which the parent traces.
+pub fn apply_update(sender: &str, policy: &crate::link::Policy) -> bool {
+    let mut g = lock();
+    let Some(current) = g.as_mut() else {
+        crate::bg::dbg::trace(serde_json::json!({
+            "phase": "link_policy_update_refused", "sender": sender, "why": "no mirror"
+        }));
+        return false;
+    };
+    if current.parent != sender {
+        crate::bg::dbg::trace(serde_json::json!({
+            "phase": "link_policy_update_refused", "sender": sender,
+            "why": "not this session's parent", "parent": current.parent
+        }));
+        return false;
+    }
+    let Some(mode) = crate::policy::parse_mode(&policy.mode) else {
+        crate::bg::dbg::trace(serde_json::json!({
+            "phase": "link_policy_update_refused", "sender": sender,
+            "why": "unknown mode", "mode": policy.mode
+        }));
+        return false;
+    };
+    current.mode = mode;
+    current.extras = policy.extras.clone();
+    crate::bg::dbg::trace(serde_json::json!({
+        "phase": "link_policy_updated", "parent": current.parent, "mode": mode.as_str()
+    }));
+    true
 }
 
 /// The effective mode: the parent's mode is the baseline for a mirrored
@@ -164,5 +209,45 @@ mod tests {
         assert_eq!(i.extras, vec!["C:\\x".to_string()]);
         clear();
         assert!(get().is_none());
+    }
+
+    fn pushed(mode: &str, extras: &[&str]) -> crate::link::Policy {
+        crate::link::Policy {
+            mode: mode.to_string(),
+            workspace: String::new(),
+            temp: String::new(),
+            extras: extras.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// A parent's level change, pushed over the link, moves this child's
+    /// baseline in **both** directions — and only the parent may move it.
+    #[test]
+    fn apply_update_moves_the_baseline_in_both_directions() {
+        let _t = test_lock();
+        clear();
+        // nothing mirrored ⇒ nothing to move (fail-closed)
+        assert!(!apply_update("parent-1", &pushed("read-only", &[])));
+
+        set("parent-1".into(), Mode::WorkspaceWrite, vec!["C:\\old".into()]);
+        // the parent narrows ⇒ the child's baseline narrows (roots too)
+        assert!(apply_update("parent-1", &pushed("read-only", &[])));
+        let i = get().expect("mirrored");
+        assert_eq!(i.mode, Mode::Readonly);
+        assert!(i.extras.is_empty(), "the roots mirror follows the level");
+        assert_eq!(floor(Mode::DangerFullAccess), Mode::Readonly, "the new cap holds");
+
+        // the parent widens ⇒ the child's baseline widens
+        assert!(apply_update("parent-1", &pushed("danger-full-access", &["C:\\new"])));
+        let i = get().expect("mirrored");
+        assert_eq!(i.mode, Mode::DangerFullAccess);
+        assert_eq!(i.extras, vec!["C:\\new".to_string()]);
+
+        // any other sender — or an unknown mode — moves nothing
+        assert!(!apply_update("someone-else", &pushed("read-only", &[])));
+        assert!(!apply_update("parent-1", &pushed("admin", &[])));
+        let i = get().expect("mirrored");
+        assert_eq!(i.mode, Mode::DangerFullAccess, "the mirror kept its value");
+        clear();
     }
 }

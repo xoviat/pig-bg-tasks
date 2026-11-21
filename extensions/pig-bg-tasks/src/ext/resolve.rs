@@ -133,7 +133,6 @@ fn ui_for(ctx: &Context, req: &Request) -> Ui {
 /// deadline hits — any transport problem is an error, and `approve` turns
 /// errors into "nothing was executed").
 fn relay_ui(ctx: &Context, parent: &str, req: &Request) -> Ui {
-    let config_root = config_home(ctx);
     let base = crate::link::Ask {
         uuid: new_ask_id(),
         mode: req.requested_mode.clone(),
@@ -155,7 +154,7 @@ fn relay_ui(ctx: &Context, parent: &str, req: &Request) -> Ui {
             move |title: &str, _options: &[&str], _prompt: Option<&DenialReasonPrompt>| {
                 let mut ask = base.clone();
                 ask.title = title.to_string();
-                match crate::link::client::ask(&parent, &config_root, &ask) {
+                match crate::link::client::ask(&parent, &ask) {
                     Ok(out) => Ok(verdict_decision(&out)),
                     Err(e) => Err(crate::link::channel_unreachable(
                         &ask.mode,

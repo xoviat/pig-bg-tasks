@@ -152,10 +152,12 @@ cause): never bare, never half-applied. Full invariant list: **`CONVERGENCE.md`*
 
 A delegated child — any process whose environment carries `PIG_PARENT_SESSION`, the session id of
 the session that spawned it (pi-subagents' one provenance marker) — orients to its parent over one
-AF_UNIX socket: `<configRoot>/agent/sandbox-asks/<sessionId>.sock` with a temp-dir fallback, on
-every platform (Windows binds a real winsock `AF_UNIX` socket). Both ends are this extension — and
-**no new model tools**: the child's approval is asked of the parent session's user through the
-parent session's own dialog.
+AF_UNIX socket per session: `<osTempDir>/pig-sandbox-<sessionId>.sock` — the OS temp dir
+(`%TEMP%` / `$TMPDIR`), which both ends already agree on, so no config root has to be shared — on
+every platform (Windows binds a real winsock `AF_UNIX` socket). That single socket transports
+everything that crosses the link: the policy fetch, the ask relay, and the parent's pushed policy
+updates. Both ends are this extension — and **no new model tools**: the child's approval is asked of
+the parent session's user through the parent session's own dialog.
 
 - **parent**: listens from `session_start` under its own **SDK** session id — a session may be a
   child and a parent at once (nested delegation), so the listener always starts and the client only
@@ -163,8 +165,12 @@ parent session's own dialog.
 - **policy mirroring**: the child fetches the parent's policy at session start and adopts it — the
   **parent's mode is the baseline** (the child's own `sandbox.json` default does not apply) and a
   local `/sandbox` choice may only *narrow* it, so nothing runs a child wider than its parent; the
-  **parent's extra writable roots replace the child's**. An unreachable parent leaves the local
-  policy untouched: a child never *widens* by being unreachable;
+  **parent's extra writable roots replace the child's**. The mirror stays live: whenever the
+  parent's level **widens or narrows**, the parent pushes the new snapshot down the same socket
+  (`op:"policy-update"`) to every child that fetched one, and the child re-baselines in both
+  directions — a frame from any other session is refused, so only the session that spawned the
+  child can move it. An unreachable parent leaves the local policy untouched: a child never
+  *widens* by being unreachable;
 - **ask relay**: a headless escalation kicks the ask up instead of failing — the child blocks
   (≤ 300 s) while the **parent session's user answers the standard Deny-first dialog**, worded
   exactly like a local escalation (same title builder), so it reads as if it originated there. A
@@ -172,8 +178,8 @@ parent session's own dialog.
   timeout is fail-closed (nothing executes), and a deny's reason reaches the child in the ladder's
   usual wording (`. The user's reason: …`).
 
-The endpoint name — the parent's session id — is the capability, under the user's own directories:
-that is the fat-finger bar of the threat model.
+The endpoint name — the parent's session id — is the capability, under the user's own temp
+directory: that is the fat-finger bar of the threat model.
 
 ### Denial classification (English-only)
 

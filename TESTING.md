@@ -189,7 +189,7 @@ Two traps observed in that run's log — assert accordingly:
 |---|---|---|
 | registration | `pig install . --validate-only --json` (real home, `PIG_CELL_BUILD_TIMEOUT=40m`) | `"valid": true, "registered": true`; **4 tools** (`bash`, `bg_list`, `bg_output`, `bg_stop` — deliberately no approval tools) + 3 commands |
 | piped session | `pig-tmp/smoke-rs-harness.log` (real home — see §7's PIG_HOME collision) | `echo HARNESS_OK` → `HARNESS_OK`; `bg_list` → `No background jobs`; no `Extension error` |
-| link lifecycle | `%TEMP%\pi-bg-tasks\bash-calls.jsonl` | `link_started {"session":"01a1fc61-…","endpoints":2}` at session start, `link_stopped {"session_endpoints":2}` at shutdown (7 s session); `<configRoot>/agent/sandbox-asks/` left empty — socket files removed |
+| link lifecycle | `%TEMP%\pi-bg-tasks\bash-calls.jsonl` | expect `link_started {"session":"01a1fc61-…","endpoints":1}` at session start and `link_stopped {"session_endpoints":1}` at shutdown (7 s session) — one socket per session now, in the OS temp dir — with `%TEMP%\pig-sandbox-<sessionId>.sock` removed on exit |
 | cross-platform | `cargo check --target x86_64-unknown-linux-gnu --all-targets` | clean (the `cfg(unix)` transport compiles) |
 
 Environment facts for future prompts:
@@ -217,21 +217,25 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cargo test                                 # extensions/pig-bg-tasks, single crate: 115 unit tests + 14 smoke tests (129 total)
+cargo test                                 # extensions/pig-bg-tasks, single crate: 118 unit tests + 14 smoke tests (132 total)
 rustup target add x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
     # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean
 ```
 
-The parent-link suite (`link::*`, 11 tests, plus 3 `policy::inherit`
-tests, 2026-11-20) is part of the unit run: AF_UNIX framing + endpoint
-derivation, `policy` over the socket, ask → the parent's dialog verdict
-(allow / deny-with-reason / cancel / headless-parent refusal),
-`escalate::approve` over the socket (allow / deny / cancel / unreachable
-parent), the client's own deadline, and policy **mirroring** (mode baseline
-+ roots). It binds real sockets under the temp dir and the test temp roots
-— run it unconfined like the rest of §6 (see §7's note). The `bg::dbg`
-trace test tolerates the link tests' concurrent appends to the shared
+The parent-link suite (`link::*`, 13 tests, plus 4 `policy::inherit`
+tests) is part of the unit run: AF_UNIX framing + the single tmp-dir
+endpoint derivation (`<osTempDir>/pig-sandbox-<id>.sock`), `policy` over
+the socket, ask → the parent's dialog verdict (allow / deny-with-reason /
+cancel / headless-parent refusal), `escalate::approve` over the socket
+(allow / deny / cancel / unreachable parent), the client's own deadline,
+and policy **mirroring** (mode baseline + roots) — plus the propagation
+pair: a permission-level change fanning out to a child's own socket
+(narrow *and* widen, two listeners in one process) and
+`inherit::apply_update` accepting only the mirroring session's frame. It
+binds real sockets under the OS temp dir — run it unconfined like the
+rest of §6 (see §7's note). The `bg::dbg` trace test tolerates the link
+tests' concurrent appends to the shared
 `%TEMP%\pi-bg-tasks\bash-calls.jsonl`.
 
 `pig-sdk` resolution for plain cargo comes from the repository root's

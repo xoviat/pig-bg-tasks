@@ -11,17 +11,25 @@
 //!   loop serves one connection per request and answers `policy` (this
 //!   session's sandbox policy) and `ask` (a delegated child's escalation,
 //!   which this session's user answers through this session's own dialog).
+//!   One socket transports *everything*: when this session's permission
+//!   level widens or narrows, the same endpoint pushes the new level out
+//!   as `op:"policy-update"` to every child that fetched a policy.
 //! - **Child side** ([`client`]): the presence of `PIG_PARENT_SESSION` in
 //!   the environment is what *makes* a session a child — it names the
 //!   immediate parent's session and therefore the endpoint to dial. A
 //!   session may be a child and a parent at the same time: the listener
 //!   always starts for the SDK session id, and the client starts when the
-//!   marker is set.
+//!   marker is set. A `policy-update` from its parent re-baselines the
+//!   mirrored policy ([`crate::policy::inherit`]).
 //! - **Fail-closed**: connect failure, timeout, or a malformed reply denies
 //!   the escalation (the child runs confined instead of unapproved).
 //!
+//! There is exactly **one** endpoint per session — the OS temp dir holds
+//! [`endpoint`]'s socket file — so parent and child derive the same path
+//! from knowledge they already share (no config root to agree on).
+//!
 //! Wire: one JSON object per line, versioned by `v`.
-//! Requests are `{"v":1,"op":"policy"|"ask", …}`; replies are
+//! Requests are `{"v":1,"op":"policy"|"ask"|"policy-update", …}`; replies are
 //! `{"v":1,"ok":true, …}` or `{"v":1,"ok":false,"error":"…"}`.
 
 pub mod client;
@@ -68,8 +76,9 @@ pub const ASK_TIMEOUT: Duration = Duration::from_secs(300);
 pub const IO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Windows AF_UNIX `sun_path` is 108 bytes including the terminator;
-/// macOS `sockaddr_un.sun_path` is 104. Endpoints longer than this are
-/// skipped deterministically on both sides (the fallback is short).
+/// macOS `sockaddr_un.sun_path` is 104. An endpoint at or over this length
+/// cannot bind or connect on either platform, so both ends refuse it
+/// deterministically — one socket, refused the same way on both sides.
 const MAX_ENDPOINT_BYTES: usize = 100;
 
 /// One request/reply frame.
@@ -106,38 +115,27 @@ pub fn safe_id(session_id: &str) -> String {
     out
 }
 
-/// The agreed primary endpoint: `<configRoot>/agent/sandbox-asks/<id>.sock`.
-/// Both ends derive it from knowledge they already share (the config root is
-/// the same user's) — the location is agreed on, never passed.
-pub fn primary_endpoint(config_root: &str, session_id: &str) -> PathBuf {
-    Path::new(config_root)
-        .join("agent")
-        .join("sandbox-asks")
-        .join(format!("{}.sock", safe_id(session_id)))
+/// The socket directory: the **OS temp dir** (`%TEMP%` on Windows,
+/// `$TMPDIR`/`/tmp` otherwise). One directory both ends already agree on —
+/// a parent and its child derive the same path even when their config
+/// roots differ, so this is the whole location agreement there is.
+pub fn socket_dir() -> PathBuf {
+    std::env::temp_dir()
 }
 
-/// The agreed fallback endpoint under the temp directory (config roots that
-/// differ between parent and child, or an over-long primary path).
-pub fn fallback_endpoint(session_id: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("pig-sandbox-asks-{}.sock", safe_id(session_id)))
+/// The single agreed endpoint: `<socketDir>/pig-sandbox-<id>.sock`. One
+/// socket per session transports everything that crosses the link — the
+/// child's `policy` fetch, the `ask` relay, and the parent's
+/// `policy-update` when its permission level changes. Both ends derive it
+/// from the session id; the location is agreed on, never passed.
+pub fn endpoint(session_id: &str) -> PathBuf {
+    socket_dir().join(format!("pig-sandbox-{}.sock", safe_id(session_id)))
 }
 
-/// The endpoints to try, in order: primary (when it fits the platform's
-/// `sun_path`), then the temp fallback when it differs.
-pub fn endpoints(config_root: &str, session_id: &str) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let primary = primary_endpoint(config_root, session_id);
-    if fits(&primary) {
-        out.push(primary);
-    }
-    let fallback = fallback_endpoint(session_id);
-    if fits(&fallback) && !out.contains(&fallback) {
-        out.push(fallback);
-    }
-    out
-}
-
-fn fits(p: &Path) -> bool {
+/// Whether `p` fits the platform's socket address limit (see
+/// [`MAX_ENDPOINT_BYTES`]); a session whose endpoint does not fit gets no
+/// link at all, refused identically on both sides.
+pub fn fits(p: &Path) -> bool {
     p.to_string_lossy().len() < MAX_ENDPOINT_BYTES
 }
 
@@ -357,30 +355,34 @@ mod tests {
 
     #[test]
     fn endpoint_derivation_is_agreed_and_path_safe() {
-        let p = primary_endpoint(r"C:\cfg", "sess-1");
-        let want = Path::new(r"C:\cfg")
-            .join("agent")
-            .join("sandbox-asks")
-            .join("sess-1.sock");
+        let p = endpoint("sess-1");
+        let want = std::env::temp_dir().join("pig-sandbox-sess-1.sock");
         assert_eq!(p, want, "{p:?}");
+        assert_eq!(p.parent(), Some(socket_dir().as_path()), "{p:?}");
         // hostile ids cannot escape the directory
-        let bad = primary_endpoint("/cfg", "../../evil");
+        let bad = endpoint("../../evil");
         let bad = bad.to_string_lossy();
         assert!(!bad.contains(".."), "{bad}");
-        assert!(bad.ends_with("----evil.sock"), "{bad}");
+        assert!(bad.ends_with("pig-sandbox-------evil.sock"), "{bad}");
     }
 
     #[test]
-    fn endpoints_try_primary_then_fallback() {
-        let eps = endpoints("/cfg", "abc-123");
-        assert_eq!(eps.len(), 2, "{eps:?}");
-        assert!(eps[0].to_string_lossy().contains("sandbox-asks"), "{eps:?}");
-        assert!(eps[1].to_string_lossy().contains("pig-sandbox-asks"), "{eps:?}");
-        // over-long primary is skipped on both sides (deterministic)
-        let long = "x".repeat(200);
-        let eps2 = endpoints(&long, "abc-123");
-        assert_eq!(eps2.len(), 1, "{eps2:?}");
-        assert!(eps2[0].to_string_lossy().contains("pig-sandbox-asks"));
+    fn one_socket_per_session_in_the_tmp_dir() {
+        // Both ends derive the identical path from the session id alone —
+        // no config root to share, so a parent and its child always agree.
+        let a = endpoint("abc-123");
+        assert_eq!(a, endpoint("abc-123"), "{a:?}");
+        assert_eq!(
+            a.file_name().unwrap().to_string_lossy(),
+            "pig-sandbox-abc-123.sock",
+            "{a:?}"
+        );
+        assert_eq!(a.parent(), Some(socket_dir().as_path()), "{a:?}");
+        assert!(fits(&a), "{a:?}");
+        // An id that would outrun the platform's `sun_path` gets no
+        // endpoint at all — one socket, refused the same way on both sides.
+        let long = endpoint(&"x".repeat(200));
+        assert!(!fits(&long), "{long:?}");
     }
 
     #[test]

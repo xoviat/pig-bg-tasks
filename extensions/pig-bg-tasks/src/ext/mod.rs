@@ -149,12 +149,9 @@ pub fn build() -> Extension {
             // config is read, so the mode baseline and the roots apply
             // from the very first spawn. An unreachable parent leaves the
             // local policy untouched (a child never widens by being
-            // unreachable).
-            let fetched = crate::link::client::fetch_policy(
-                &parent,
-                &resolve::config_home(ctx),
-                &session_id,
-            );
+            // unreachable); later level changes arrive as `policy-update`
+            // on this child's own socket (see `on_policy_update` below).
+            let fetched = crate::link::client::fetch_policy(&parent, &session_id);
             if let Some(p) = fetched {
                 if let Some(mode) = crate::policy::parse_mode(&p.mode) {
                     crate::policy::inherit::set(parent, mode, p.extras);
@@ -172,13 +169,7 @@ pub fn build() -> Extension {
             let policy_ctx = ctx.clone();
             let workspace = crate::policy::canonical(ctx.cwd());
             let temp = std::env::temp_dir().to_string_lossy().into_owned();
-            let approver: Option<
-                std::sync::Arc<
-                    dyn Fn(&crate::link::Ask) -> Result<crate::link::Verdict, String>
-                        + Send
-                        + Sync,
-                >,
-            > = if ctx.has_ui() {
+            let approver: Option<crate::link::server::Approver> = if ctx.has_ui() {
                 let actx = ctx.clone();
                 Some(std::sync::Arc::new(
                     move |ask: &crate::link::Ask| {
@@ -209,9 +200,23 @@ pub fn build() -> Extension {
             } else {
                 None
             };
+            // A parent's permission-level change is pushed down this
+            // session's own socket (`op:"policy-update"`): only the
+            // session this child mirrors may move its baseline —
+            // `apply_update` refuses any other sender — and it reports
+            // whether it applied, which the parent traces. Non-children
+            // get no applier at all: there is no baseline to move.
+            let on_policy_update: Option<crate::link::server::PolicyApplier> =
+                crate::link::parent_session().map(|_| {
+                    let applier: crate::link::server::PolicyApplier = std::sync::Arc::new(
+                        |sender: &str, policy: crate::link::Policy| {
+                            crate::policy::inherit::apply_update(sender, &policy)
+                        },
+                    );
+                    applier
+                });
             crate::link::server::start(crate::link::server::ServerOpts {
                 session_id,
-                config_root: resolve::config_home(ctx),
                 policy: std::sync::Arc::new(move || {
                     let c = resolve::config_for(&policy_ctx);
                     crate::link::Policy {
@@ -224,6 +229,7 @@ pub fn build() -> Extension {
                     }
                 }),
                 approver,
+                on_policy_update,
             });
         }
         // CONVERGENCE: synchronous now — initial epoch = startup policy state

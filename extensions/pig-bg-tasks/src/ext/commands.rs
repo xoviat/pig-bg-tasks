@@ -67,7 +67,21 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
     // widen it past the session that spawned it.
     let mode = crate::policy::inherit::floor(requested);
     crate::policy::permission::set(mode);
+    // The level moved: push it to every child that mirrored this session's
+    // policy, over each child's own socket — otherwise a child would keep
+    // running the level it fetched at its `session_start`, no matter how
+    // far this session has widened or narrowed since. Detached and
+    // best-effort: a missing child never delays or fails the switch.
+    crate::link::server::broadcast_policy();
     let epoch = Engine::shared().set_mode(mode);
+    // Say how far the new level travelled: the push itself is detached, so
+    // this reads the fan-out set (0 = no link, or no child ever asked).
+    let kids = crate::link::server::children().len();
+    let propagated = if kids > 0 {
+        format!("; pushed to {kids} child session{}", if kids == 1 { "" } else { "s" })
+    } else {
+        String::new()
+    };
     let capped = if mode != requested {
         format!(
             " (requested {arg} but this child mirrors parent session policy, capped at {mode})"
@@ -77,7 +91,7 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
     };
     ctx.notify(
         &format!(
-            "sandbox: mode set to {mode} (process-wide){capped} — epoch {epoch} converged; the next bash call runs under it."
+            "sandbox: mode set to {mode} (process-wide){capped} — epoch {epoch} converged; the next bash call runs under it{propagated}."
         ),
         "info",
     );

@@ -72,16 +72,18 @@ already funnels `write_roots: &[String]` into the `ContainerRequest` (`readwrite
 `src/ext/{mod,resolve,tasks}.rs`, `src/policy/inherit.rs`):
 
 1. **Parent side (listener).** `session_start` binds this session's id —
-   from the SDK (`ctx.get_session_id()`) — at
-   `<configRoot>/agent/sandbox-asks/<id>.sock`, plus a temp-dir fallback
-   (`<temp>/pig-sandbox-asks-<id>.sock`) for a child whose config root
-   differs; an accept loop serves one connection per request. On Windows
+   from the SDK (`ctx.get_session_id()`) — at the **single** endpoint
+   `<osTempDir>/pig-sandbox-<id>.sock` (the OS temp dir — `%TEMP%` /
+   `$TMPDIR` — which both ends already agree on, so parent and child
+   derive the same path even when their config roots differ); an accept
+   loop serves one connection per request. On Windows
    the endpoint is a real **AF_UNIX socket** (winsock `AF_UNIX`:
    `bind`/`listen` plus a raw `accept` — std's own `TcpListener::accept`
    rejects the AF_UNIX address family with EINVAL, so the listener wraps
    the accepted handle in a `TcpStream` for framing); on Unix it is
    `UnixListener`. Same path convention and same JSON-per-line wire on
-   both platforms.
+   both platforms. One socket transports *all* of §B: `policy` fetch,
+   `ask` relay, and the parent's `policy-update` push below.
 2. **Child side (asker).** `PIG_PARENT_SESSION` present ⇒ this session is
    a child (its presence *is* the test; a session may be child and parent
    at once — the listener always starts for the SDK id). On a headless
@@ -109,7 +111,7 @@ already funnels `write_roots: &[String]` into the `ContainerRequest` (`readwrite
 
 4. **Identity.** The endpoint name carries the session id (a uuid — the
    capability, sufficient for this crate's fat-finger threat model) and
-   the socket file is user-only (0600 on Unix; the user-owned config/temp
+   the socket file is user-only (0600 on Unix; the user-owned temp
    directory on Windows). Optional hardening still open: verify the peer
    pid (`SO_PEERCRED`) and correlate `childSession` with the spawner's
    records.
@@ -126,12 +128,26 @@ policy untouched: a child never *widens* by being unreachable. Nested
 children mirror their immediate parent, which already mirrors its own —
 the chain propagates.
 
+**Level changes propagate (the mirror is not a one-shot read).** A child
+registers itself with the parent when it fetches `op:"policy"` (and on
+every `ask`); when the parent's level then **widens or narrows** —
+`/sandbox`, which calls `permission::set` — it pushes its live policy
+closure down each registered child's socket as
+`{"v":1,"op":"policy-update","parent":<parent session>,"policy":{mode,
+workspace, temp, extras}}`, best-effort and off the calling thread (a
+child that is gone is traced, never delays the switch). The child's
+applier (`inherit::apply_update`) replaces its baseline **only** when the
+frame's `parent` equals the session it mirrors — a foreign sender, an
+unknown mode or no mirror at all leaves the mirror untouched — and
+replies `{"applied":true|false}`, which is what the parent traces. The
+child's next tool call converges under the new level (mode *and* roots),
+so a grandchild inherits the change on the next hop of the same chain.
+
 **Not implemented from this section:** the file-rendezvous fallback
-(`<configRoot>/agent/sandbox-asks/` atomic write + poll-for-reply +
-bounded wait). Today an unreachable socket is simply fail-closed (deny),
-which the test plan's "no listener" case accepts; the fallback stays a
-listed improvement for a parent whose *listener* died while its session
-lives.
+(atomic write + poll-for-reply + bounded wait next to the socket). Today
+an unreachable socket is simply fail-closed (deny), which the test plan's
+"no listener" case accepts; the fallback stays a listed improvement for a
+parent whose *listener* died while its session lives.
 
 ### C. Junction grants inside declared roots — *not implemented yet*
 
