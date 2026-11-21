@@ -161,6 +161,21 @@ pub struct Request {
     pub summary: String,
 }
 
+/// The approval dialog's title, byte-identical wherever the ask is shown:
+/// the local dialog in this session, and the parent's dialog for an ask
+/// relayed up from a delegated child (it must read as if it originated
+/// here).
+pub fn approval_title(subject: &str, mode: &str, justification: &str, summary: &str) -> String {
+    let mut summary = summary.to_string();
+    if summary.chars().count() > 200 {
+        summary = summary.chars().take(200).collect::<String>() + "…";
+    }
+    let noun = subject_noun(subject);
+    format!(
+        "Sandbox escalation: allow this {subject} under {mode:?}?\n\nReason: {justification}\n{noun}: {summary}"
+    )
+}
+
 /// Resolve one escalation request before execution. Order is priority and
 /// everything fails closed: same-mode no approval → strictly wider check →
 /// hasUI check → ask (Deny → error with optional reason). The result applies
@@ -181,14 +196,11 @@ pub fn approve(req: &Request, ui: &Ui) -> Result<Mode, String> {
             req.requested_mode, req.requested_mode
         ));
     }
-    let mut summary = req.summary.clone();
-    if summary.chars().count() > 200 {
-        summary = summary.chars().take(200).collect::<String>() + "…";
-    }
-    let noun = subject_noun(&req.subject);
-    let title = format!(
-        "Sandbox escalation: allow this {} under {:?}?\n\nReason: {}\n{}: {}",
-        req.subject, req.requested_mode, req.justification, noun, summary
+    let title = approval_title(
+        &req.subject,
+        &req.requested_mode,
+        &req.justification,
+        &req.summary,
     );
     let decision = (ui.ask)(&title, &ESCALATION_OPTIONS, Some(&DENIAL_REASON_PROMPT))?;
     if decision.choice.is_empty() {

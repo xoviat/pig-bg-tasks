@@ -11,6 +11,7 @@ pub mod bg;
 pub mod classify;
 pub mod escalate;
 pub mod ext;
+pub mod link;
 pub mod policy;
 pub mod runner;
 

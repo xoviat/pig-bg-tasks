@@ -128,14 +128,16 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         trace(json!({"phase": "unit-test", "n": 1}));
         trace(json!({"phase": "unit-test", "n": 2}));
+        // The log is shared with the link tests (they trace `link_*` from
+        // their serving threads), so assert presence, not position: a
+        // concurrent append may legitimately be the newest record.
         let t = tail(10);
-        assert!(t.len() >= 2, "tail got {} records", t.len());
-        assert!(t.iter().any(|r| r["n"] == 2));
-        assert!(t.iter().all(|r| r["ts"].is_string()));
-        // tail cap keeps only the newest n
+        assert!(t.iter().any(|r| r["n"] == 1), "first record present");
+        assert!(t.iter().any(|r| r["n"] == 2), "second record present");
+        assert!(t.iter().all(|r| r["ts"].is_string()), "ts auto-filled");
+        // tail cap keeps only the newest n records of the file
         let t1 = tail(1);
         assert_eq!(t1.len(), 1);
-        assert_eq!(t1[0]["n"], 2);
         let _ = std::fs::remove_file(&p);
     }
 

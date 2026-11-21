@@ -34,6 +34,7 @@ pig-sdk = "0.1.0"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }

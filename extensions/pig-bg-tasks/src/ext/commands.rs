@@ -58,16 +58,26 @@ pub fn sandbox_handler(ctx: &Context, args: &str) -> CommandResult {
     // override, bump + converge the epoch, report. The convergence status
     // line ("epoch N — converged: …") is not echoed here — `/sandbox` with
     // no args still shows it.
-    let mode = match arg {
+    let requested = match arg {
         "read-only" => Mode::Readonly,
         "workspace-write" => Mode::WorkspaceWrite,
         _ => Mode::DangerFullAccess,
     };
+    // A mirrored child is capped at its parent's mode: `/sandbox` cannot
+    // widen it past the session that spawned it.
+    let mode = crate::policy::inherit::floor(requested);
     crate::policy::permission::set(mode);
     let epoch = Engine::shared().set_mode(mode);
+    let capped = if mode != requested {
+        format!(
+            " (requested {arg} but this child mirrors parent session policy, capped at {mode})"
+        )
+    } else {
+        String::new()
+    };
     ctx.notify(
         &format!(
-            "sandbox: mode set to {arg} (process-wide) — epoch {epoch} converged; the next bash call runs under it."
+            "sandbox: mode set to {mode} (process-wide){capped} — epoch {epoch} converged; the next bash call runs under it."
         ),
         "info",
     );
@@ -86,6 +96,12 @@ pub fn sandbox_status(ctx: &Context) -> String {
     };
     let mut lines: Vec<String> = Vec::new();
     lines.push(format!("sandbox mode: {effective} ({source})"));
+    if let Some(inherited) = crate::policy::inherit::get() {
+        lines.push(format!(
+            "mirrors parent session {} (mode {}; this child's own config {} does not apply)",
+            inherited.parent, inherited.mode, cfg.mode
+        ));
+    }
     if effective == Mode::DangerFullAccess {
         lines.push("runner: bypassed (danger-full-access)".to_string());
     } else {

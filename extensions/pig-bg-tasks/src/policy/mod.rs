@@ -8,6 +8,7 @@
 //! `<ConfigHome>/agent/sandbox.json`. Same filename, same schema.
 
 pub mod config;
+pub mod inherit;
 pub mod permission;
 
 use std::path::Path;
@@ -42,6 +43,16 @@ pub const SANDBOX_MODES: [Mode; 3] = [Mode::Readonly, Mode::WorkspaceWrite, Mode
 /// Whether `value` names a known mode.
 pub fn is_mode(value: &str) -> bool {
     SANDBOX_MODES.iter().any(|m| m.as_str() == value)
+}
+
+/// Parse a mode name (`None` for anything unknown).
+pub fn parse_mode(value: &str) -> Option<Mode> {
+    match value {
+        "read-only" => Some(Mode::Readonly),
+        "workspace-write" => Some(Mode::WorkspaceWrite),
+        "danger-full-access" => Some(Mode::DangerFullAccess),
+        _ => None,
+    }
 }
 
 /// Whether mode goes through a runner.
@@ -109,9 +120,12 @@ pub fn writable_roots(mode: Mode, workspace_root: &str, extra_roots: &[String]) 
 }
 
 /// Process-wide `/sandbox` override beats the config default. (An approved
-/// escalation applies per call, at the tool layer.)
+/// escalation applies per call, at the tool layer.) A delegated child
+/// *mirrors* its parent's policy instead — [`inherit::mirror_mode`] — so
+/// neither the config nor `/sandbox` can run it wider than the session that
+/// spawned it.
 pub fn resolve_effective_mode(mode_override: Option<Mode>, config_default: Mode) -> Mode {
-    mode_override.unwrap_or(config_default)
+    inherit::mirror_mode(mode_override, config_default)
 }
 
 /// Home directory (Go `os.UserHomeDir`).
@@ -182,10 +196,30 @@ mod tests {
 
     #[test]
     fn effective_mode_override() {
+        // The result now depends on the process-global mirrored policy
+        // (inherit::mirror_mode) — hold the shared lock so a child-policy
+        // test cannot interleave.
+        let _t = inherit::test_lock();
+        inherit::clear();
         assert_eq!(
             resolve_effective_mode(Some(Mode::Readonly), Mode::WorkspaceWrite),
             Mode::Readonly
         );
         assert_eq!(resolve_effective_mode(None, Mode::WorkspaceWrite), Mode::WorkspaceWrite);
+        // a mirrored child takes the parent's mode as its baseline and can
+        // only narrow it
+        inherit::set("parent".into(), Mode::WorkspaceWrite, vec![]);
+        assert_eq!(
+            resolve_effective_mode(None, Mode::DangerFullAccess),
+            Mode::WorkspaceWrite,
+            "the mirror replaces the child's config default"
+        );
+        assert_eq!(
+            resolve_effective_mode(Some(Mode::DangerFullAccess), Mode::DangerFullAccess),
+            Mode::WorkspaceWrite,
+            "nothing widens a child past its parent"
+        );
+        assert_eq!(resolve_effective_mode(Some(Mode::Readonly), Mode::DangerFullAccess), Mode::Readonly);
+        inherit::clear();
     }
 }

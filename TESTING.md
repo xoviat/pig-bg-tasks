@@ -81,17 +81,26 @@ identity" (`extensions.md`) — the cheapest full build check. Expect:
 
 The **first run builds the runtime cell** (cargo compiles the whole workspace
 plus `mxc-sdk` and the staged `pig-sdk` — minutes; `PIG_CELL_BUILD_TIMEOUT`
-raises the build cap, `environment-variables.md`). Later runs hit the
+raises the build cap, `environment-variables.md`). The value is a **Go
+duration** (`40m`, `1200s`) — a bare number fails `time.ParseDuration` and
+silently falls back to the 10-minute default (observed 2026-11-20: a cold
+cell build died at "12m3s" = 10 min + the 2 min validation-load bound,
+`valid: false`, empty cargo output). Later runs hit the
 content-addressed cache and are fast. `pig reload` drops cells an older SDK
 produced.
 
 ## 4. End-to-end: piped prompts in print mode
 
 ```bash
-printf '%s\n' "Run: echo HARNESS_OK — use the bash tool and reply with its exact output." \
-  | PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)/extensions/pig-bg-tasks" -p \
+PIG_HOME="$PIG_HOME" pig -ne -e "$(pwd)/extensions/pig-bg-tasks" -p \
   > pig-tmp/smoke-rs-harness.log 2>&1
 ```
+
+Caution (§7): the isolated `PIG_HOME` from §1 lives *inside* the repository,
+so its cell build picks up the repo `.cargo/config.toml` patch and collides
+with pig's `PIG_HOME`-staged SDK. Since 2026-11-20 the piped run below is
+executed **without** `PIG_HOME` (real home, README acceptance pattern) — the
+cell is the one `--validate-only` just warmed.
 
 Print-mode facts (`cli-integration.md`):
 
@@ -120,8 +129,8 @@ on _changed sources_ the session first rebuilds the packed Rust cell —
 observed ~9 min cold (vs ~60 s warm) — and during it the log shows nothing
 beyond the package lines until it finishes; a 240 s cap killed a healthy run
 with `EXIT=124` and a 132-byte log. Recipe: warm the cell first with
-`pig install … --validate-only` (set `PIG_CELL_BUILD_TIMEOUT=1200` for the
-cold build), then run the piped prompts with modest caps — they reuse the
+`pig install … --validate-only` (set `PIG_CELL_BUILD_TIMEOUT=40m` for the
+cold build — a Go duration; a bare `1200` is ignored, see §3), then run the piped prompts with modest caps — they reuse the
 cached cell. Re-warm after ANY source edit.
 
 ### Observed (2026-10-25, this machine)
@@ -174,6 +183,15 @@ Two traps observed in that run's log — assert accordingly:
 | git clone           | `smoke-rs-gitclone.log`                   | `git clone --depth 1 https://github.com/octocat/Hello-World.git` → `README` + commit `7fd1a60` + marker (native `git.exe` survives MXC; tree re-verified out-of-band, then removed)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | danger bare         | `smoke-rs-bare.log`, `smoke-rs-bare2.log` | fixture `agent/sandbox.json` = `{"mode":"danger-full-access"}` → `mode: danger-full-access (config default)  confined: false`, `runner: bypassed (danger-full-access)`, trace `confined:false`; `ping` 2/2 + `BARE_OK`. Restore = delete the fixture (`config file: … (absent — defaults in use)`)                                                                                                                                                                                                                                                                                                                                                                     |
 
+### Parent link through pig — observed 2026-11-20, green
+
+| Check | Where | Result |
+|---|---|---|
+| registration | `pig install . --validate-only --json` (real home, `PIG_CELL_BUILD_TIMEOUT=40m`) | `"valid": true, "registered": true`; **4 tools** (`bash`, `bg_list`, `bg_output`, `bg_stop` — deliberately no approval tools) + 3 commands |
+| piped session | `pig-tmp/smoke-rs-harness.log` (real home — see §7's PIG_HOME collision) | `echo HARNESS_OK` → `HARNESS_OK`; `bg_list` → `No background jobs`; no `Extension error` |
+| link lifecycle | `%TEMP%\pi-bg-tasks\bash-calls.jsonl` | `link_started {"session":"01a1fc61-…","endpoints":2}` at session start, `link_stopped {"session_endpoints":2}` at shutdown (7 s session); `<configRoot>/agent/sandbox-asks/` left empty — socket files removed |
+| cross-platform | `cargo check --target x86_64-unknown-linux-gnu --all-targets` | clean (the `cfg(unix)` transport compiles) |
+
 Environment facts for future prompts:
 
 - **ICMP is blocked inside the container**: `ping` → `Unable to contact IP
@@ -199,11 +217,22 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cargo test                                 # extensions/pig-bg-tasks, single crate: 87 unit tests + 14 smoke tests (101 total)
+cargo test                                 # extensions/pig-bg-tasks, single crate: 115 unit tests + 14 smoke tests (129 total)
 rustup target add x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
     # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean
 ```
+
+The parent-link suite (`link::*`, 11 tests, plus 3 `policy::inherit`
+tests, 2026-11-20) is part of the unit run: AF_UNIX framing + endpoint
+derivation, `policy` over the socket, ask → the parent's dialog verdict
+(allow / deny-with-reason / cancel / headless-parent refusal),
+`escalate::approve` over the socket (allow / deny / cancel / unreachable
+parent), the client's own deadline, and policy **mirroring** (mode baseline
++ roots). It binds real sockets under the temp dir and the test temp roots
+— run it unconfined like the rest of §6 (see §7's note). The `bg::dbg`
+trace test tolerates the link tests' concurrent appends to the shared
+`%TEMP%\pi-bg-tasks\bash-calls.jsonl`.
 
 `pig-sdk` resolution for plain cargo comes from the repository root's
 `.cargo/config.toml`, which carries a `[patch.crates-io]` to the staged SDK
@@ -254,6 +283,15 @@ cached; start again to build the current source`. Freeze the tree, run,
   repository root — the `.cargo` config root — or absolute; the dir must
   exist under `%USERPROFILE%\.pig\state\pigsdk\`). Pig's own cell builds are
   unaffected — they resolve the SDK themselves.
+- **An isolated `PIG_HOME` *inside* the repository collides with the repo's
+  `.cargo/config.toml` patch (observed 2026-11-20).** The cell build dir
+  (`<PIG_HOME>/cache/cells/rust/.build-*`) is *below* the repository root, so
+  cargo's upward config search finds the repo `.cargo/config.toml` and pins
+  `pig-sdk` at the **global** staged path (`~/.pig/state/pigsdk/…`), while pig
+  stages the SDK under the **active** `PIG_HOME` — two sources for
+  `pig-sdk v0.1.0` → `error: package collision in the lockfile` and
+  `valid: false`. Run the piped e2e against the real home (no `PIG_HOME` — the
+  README acceptance pattern), or put `PIG_HOME` outside the repository.
 - **Run `cargo test` outside a pig sandbox (observed 2026-10-29).** Under
   `workspace-write` confinement the process-enumeration tests fail spuriously:
   `kill_takes_whole_tree_while_a_waiter_blocks` panics with

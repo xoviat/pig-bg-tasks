@@ -134,6 +134,98 @@ pub fn build() -> Extension {
             p.is_dir().then(|| p.to_string_lossy().into_owned())
         });
         crate::runner::request::set_userland_dir(userland.as_deref().unwrap_or(""));
+        // ── The parent link (DELEGATED-WORKSPACES §B) ────────────────
+        // This session is a CHILD when PIG_PARENT_SESSION names its parent
+        // (the subprocess plugin's one marker) and a PARENT for its own SDK
+        // session id — possibly both at once (nested delegation): the
+        // listener always starts for the SDK id, the client only when the
+        // marker is set.
+        let session_id = ctx.get_session_id().unwrap_or_default();
+        // A previous session's inherited policy never leaks into this one
+        // (shutdown clears it too; this covers a host that skipped it).
+        crate::policy::inherit::clear();
+        if let Some(parent) = crate::link::parent_session() {
+            // Child side FIRST: mirror the parent's policy before the
+            // config is read, so the mode baseline and the roots apply
+            // from the very first spawn. An unreachable parent leaves the
+            // local policy untouched (a child never widens by being
+            // unreachable).
+            let fetched = crate::link::client::fetch_policy(
+                &parent,
+                &resolve::config_home(ctx),
+                &session_id,
+            );
+            if let Some(p) = fetched {
+                if let Some(mode) = crate::policy::parse_mode(&p.mode) {
+                    crate::policy::inherit::set(parent, mode, p.extras);
+                }
+            }
+        }
+        if !session_id.is_empty() {
+            // Parent side: this session's endpoint + ask relay. The policy
+            // snapshot is read live (the `/sandbox` override and a nested
+            // inheritance both show up in it). An ask is put in front of
+            // THIS session's user through THIS session's own dialog — a
+            // delegated escalation is asked exactly like a local one, with
+            // no separate tool or surface. No UI ⇒ no approver ⇒ the child
+            // is refused fail-closed.
+            let policy_ctx = ctx.clone();
+            let workspace = crate::policy::canonical(ctx.cwd());
+            let temp = std::env::temp_dir().to_string_lossy().into_owned();
+            let approver: Option<
+                std::sync::Arc<
+                    dyn Fn(&crate::link::Ask) -> Result<crate::link::Verdict, String>
+                        + Send
+                        + Sync,
+                >,
+            > = if ctx.has_ui() {
+                let actx = ctx.clone();
+                Some(std::sync::Arc::new(
+                    move |ask: &crate::link::Ask| {
+                        // The child sends the byte-stable dialog title;
+                        // rebuild it only when a peer sent none.
+                        let title = if ask.title.is_empty() {
+                            crate::escalate::approval_title(
+                                "command",
+                                &ask.mode,
+                                &ask.justification,
+                                &ask.summary,
+                            )
+                        } else {
+                            ask.title.clone()
+                        };
+                        match crate::ext::resolve::dialog_decide(&actx, &title) {
+                            Ok(d) if d.choice.is_empty() => {
+                                Ok(crate::link::Verdict::Cancelled)
+                            }
+                            Ok(d) if d.choice == "Deny" => {
+                                Ok(crate::link::Verdict::Deny(d.reason))
+                            }
+                            Ok(_) => Ok(crate::link::Verdict::Allow),
+                            Err(e) => Err(e),
+                        }
+                    },
+                ))
+            } else {
+                None
+            };
+            crate::link::server::start(crate::link::server::ServerOpts {
+                session_id,
+                config_root: resolve::config_home(ctx),
+                policy: std::sync::Arc::new(move || {
+                    let c = resolve::config_for(&policy_ctx);
+                    crate::link::Policy {
+                        mode: resolve_effective_mode(crate::policy::permission::get(), c.mode)
+                            .as_str()
+                            .to_string(),
+                        workspace: workspace.clone(),
+                        temp: temp.clone(),
+                        extras: c.extra_writable_dirs,
+                    }
+                }),
+                approver,
+            });
+        }
         // CONVERGENCE: synchronous now — initial epoch = startup policy state
         // (there is no background thread to spawn; only bash binds, and the
         // bind is a `stat` inside the call's duration).
@@ -169,6 +261,12 @@ pub fn build() -> Extension {
                 crate::escalate::ledger::forget(&id);
             }
         }
+        // The parent link goes down with the session: pending asks were
+        // already refused fail-closed by their own deadlines, the socket
+        // files are removed, and a nested child's inherited policy is
+        // dropped with this session's identity.
+        crate::link::server::stop();
+        crate::policy::inherit::clear();
         None
     });
 

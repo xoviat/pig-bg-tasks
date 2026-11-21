@@ -31,9 +31,14 @@ pub fn config_home(ctx: &Context) -> String {
         .clone()
 }
 
-/// The process-cached sandbox config for this host.
+/// The process-cached sandbox config for this host, with the mirrored
+/// parent-session extras applied ([`crate::policy::inherit`]) — one choke
+/// point, so every consumer (bash, `/sandbox` status, session start) sees
+/// the same roots the spawn will actually get.
 pub fn config_for(ctx: &Context) -> config::Config {
-    config::get(&config_home(ctx))
+    let mut c = config::get(&config_home(ctx));
+    c.extra_writable_dirs = crate::policy::inherit::mirror_extras(&c.extra_writable_dirs);
+    c
 }
 
 /// Pin the config root at session_start (before any tool call needs it) and
@@ -94,52 +99,153 @@ pub fn resolve_call(
         }
     }
 
-    let mode = crate::escalate::approve(
-        &Request {
-            requested_mode: requested,
-            justification,
-            effective_mode: effective,
-            subject: "command".into(),
-            summary: summary.to_string(),
-        },
-        &ui_for(ctx),
-    )?;
+    let req = Request {
+        requested_mode: requested,
+        justification,
+        effective_mode: effective,
+        subject: "command".into(),
+        summary: summary.to_string(),
+    };
+    let mode = crate::escalate::approve(&req, &ui_for(ctx, &req))?;
     Ok(ResolvedCall { mode, escalated: mode != effective, ignored_escalation: false })
+}
+
+/// The approval channel for one call, in priority order:
+///
+/// 1. this session has a UI → the host dialog (interactive sessions are
+///    unchanged — the dialog wins);
+/// 2. this session is a delegated child (`PIG_PARENT_SESSION` is set) → the
+///    ask rides the parent link and blocks on the parent's answer
+///    (DELEGATED-WORKSPACES §B);
+/// 3. otherwise → the headless stub, which fails closed.
+fn ui_for(ctx: &Context, req: &Request) -> Ui {
+    if ctx.has_ui() {
+        return dialog_ui(ctx.clone());
+    }
+    match crate::link::parent_session() {
+        Some(parent) => relay_ui(ctx, &parent, req),
+        None => Ui::headless(),
+    }
+}
+
+/// The child side of the approval channel: one `ask` frame over the
+/// parent's AF_UNIX socket, blocked on until the parent decides (or the
+/// deadline hits — any transport problem is an error, and `approve` turns
+/// errors into "nothing was executed").
+fn relay_ui(ctx: &Context, parent: &str, req: &Request) -> Ui {
+    let config_root = config_home(ctx);
+    let base = crate::link::Ask {
+        uuid: new_ask_id(),
+        mode: req.requested_mode.clone(),
+        summary: truncate_runes(&req.summary, 500),
+        justification: req.justification.clone(),
+        // The dialog title `approve` builds: the parent renders it verbatim
+        // so the wake message reads like the local dialog would.
+        title: String::new(),
+        child_session: ctx.get_session_id().unwrap_or_default(),
+        child_pid: std::process::id(),
+        started_at_ms: now_millis(),
+    };
+    let parent = parent.to_string();
+    Ui {
+        // `has_ui` here means "an approval channel exists": the parent
+        // session's user is asked through the parent's own dialog.
+        has_ui: true,
+        ask: Box::new(
+            move |title: &str, _options: &[&str], _prompt: Option<&DenialReasonPrompt>| {
+                let mut ask = base.clone();
+                ask.title = title.to_string();
+                match crate::link::client::ask(&parent, &config_root, &ask) {
+                    Ok(out) => Ok(verdict_decision(&out)),
+                    Err(e) => Err(crate::link::channel_unreachable(
+                        &ask.mode,
+                        &parent,
+                        &e,
+                    )),
+                }
+            },
+        ),
+    }
+}
+
+/// Map the parent's reply onto the escalation ladder's decision
+/// vocabulary: allow → "Allow once", deny → "Deny" + the user's reason,
+/// cancel → the empty choice `approve` reports as "was cancelled".
+/// Shared with the link tests so both ends agree on the mapping.
+pub fn verdict_decision(out: &crate::link::client::AskOutcome) -> Decision {
+    match out.decision.as_str() {
+        "allow" => Decision { choice: "Allow once".to_string(), reason: String::new() },
+        "deny" => Decision { choice: "Deny".to_string(), reason: out.reason.clone() },
+        _ => Decision::default(), // cancelled: nothing approved
+    }
+}
+
+/// A child's ask id: process-unique and short enough to quote back in the
+/// parent's dialog (`ask-<pid>-<32-bit random>`).
+fn new_ask_id() -> String {
+    let mut b = [0u8; 4];
+    let rand = if getrandom::fill(&mut b).is_ok() {
+        u32::from_le_bytes(b)
+    } else {
+        now_millis() as u32
+    };
+    format!("ask-{:x}-{:08x}", std::process::id(), rand)
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn truncate_runes(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n).collect()
+    }
 }
 
 /// Adapt the SDK dialog surface to the escalation channel: select, then an
 /// optional reason input after Deny (two-step serialised on one chain — the
 /// host has a single dialog slot).
-fn ui_for(ctx: &Context) -> Ui {
-    let ctx = ctx.clone();
+fn dialog_ui(ctx: Context) -> Ui {
     Ui {
         has_ui: ctx.has_ui(),
-        ask: Box::new(
-            move |title: &str, options: &[&str], reason_prompt: Option<&DenialReasonPrompt>| {
-                let (answer, ok) = ctx.select(title, options).map_err(|e| e.to_string())?;
-                // The client answers with any JSON value; only a string is a
-                // choice, and a cancelled dialog answers null.
-                let choice = answer.as_str().unwrap_or("").to_string();
-                if !ok || choice.is_empty() {
-                    return Ok(Decision::default()); // cancelled
-                }
-                if choice == "Deny" {
-                    if let Some(prompt) = reason_prompt {
-                        match ctx.input(prompt.title, prompt.placeholder) {
-                            Ok((reason_answer, true)) => {
-                                let reason = reason_answer.as_str().unwrap_or("").to_string();
-                                return Ok(Decision { choice, reason });
-                            }
-                            // reason-input trouble never changes the denial
-                            // semantics
-                            _ => return Ok(Decision { choice, reason: String::new() }),
-                        }
-                    }
-                }
-                Ok(Decision { choice, reason: String::new() })
-            },
-        ),
+        ask: Box::new(move |title: &str, _options: &[&str], _prompt: Option<&DenialReasonPrompt>| {
+            dialog_decide(&ctx, title)
+        }),
     }
+}
+
+/// One interactive approval decision in THIS session: the Deny-first
+/// select, then Deny's optional reason input. Shared by the local dialog
+/// and the parent side of the link, so a relayed ask is asked exactly like
+/// one that originated here. `Decision::default()` (empty choice) =
+/// cancelled / no answer.
+pub fn dialog_decide(ctx: &Context, title: &str) -> Result<Decision, String> {
+    let (answer, ok) = ctx
+        .select(title, &crate::escalate::ESCALATION_OPTIONS)
+        .map_err(|e| e.to_string())?;
+    // The client answers with any JSON value; only a string is a choice,
+    // and a cancelled dialog answers null.
+    let choice = answer.as_str().unwrap_or("").to_string();
+    if !ok || choice.is_empty() {
+        return Ok(Decision::default()); // cancelled
+    }
+    if choice == "Deny" {
+        let prompt = &crate::escalate::DENIAL_REASON_PROMPT;
+        match ctx.input(prompt.title, prompt.placeholder) {
+            Ok((reason_answer, true)) => {
+                let reason = reason_answer.as_str().unwrap_or("").to_string();
+                return Ok(Decision { choice, reason });
+            }
+            // reason-input trouble never changes the denial semantics
+            _ => return Ok(Decision { choice, reason: String::new() }),
+        }
+    }
+    Ok(Decision { choice, reason: String::new() })
 }
 
 /// Drop placeholder STRINGS ("null" / blank) from the escalation fields
