@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0] - 2026-11-20
+## [0.3.0] - 2026-11-20
 
 - **Delegated-workspace parent link** (`DELEGATED-WORKSPACES.md` §B): one AF_UNIX socket per
   session — `<configRoot>/agent/sandbox-asks/<sessionId>.sock` with a temp-dir fallback, on every
