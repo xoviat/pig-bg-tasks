@@ -1,8 +1,9 @@
 //! The parent link: one OS socket per session between the pig-bg-tasks
 //! hosted in a parent session and the pig-bg-tasks of a child process the
 //! subprocess plugin (pi-subagents) launched. AF_UNIX on every platform —
-//! including Windows (winsock `AF_UNIX`, maintainer directive; the same
-//! `net.Listen("unix")` shape the Go link uses).
+//! including Windows (winsock `AF_UNIX` via the `uds_windows` crate,
+//! maintainer directive; the same `net.Listen("unix")` shape the Go link
+//! uses).
 //!
 //! Contract (DELEGATED-WORKSPACES §B):
 //!
@@ -35,15 +36,7 @@
 pub mod client;
 pub mod server;
 
-#[cfg(unix)]
-mod transport_unix;
-#[cfg(windows)]
-mod transport_win;
-
-#[cfg(unix)]
-use transport_unix as transport;
-#[cfg(windows)]
-use transport_win as transport;
+mod transport;
 
 pub use transport::{Listener, Stream};
 

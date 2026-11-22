@@ -154,7 +154,7 @@ A delegated child — any process whose environment carries `PIG_PARENT_SESSION`
 the session that spawned it (pi-subagents' one provenance marker) — orients to its parent over one
 AF_UNIX socket per session: `<osTempDir>/pig-sandbox-<sessionId>.sock` — the OS temp dir
 (`%TEMP%` / `$TMPDIR`), which both ends already agree on, so no config root has to be shared — on
-every platform (Windows binds a real winsock `AF_UNIX` socket). That single socket transports
+every platform (Windows binds a real winsock `AF_UNIX` socket through the `uds_windows` crate). That single socket transports
 everything that crosses the link: the policy fetch, the ask relay, and the parent's pushed policy
 updates. Both ends are this extension — and **no new model tools**: the child's approval is asked of
 the parent session's user through the parent session's own dialog.

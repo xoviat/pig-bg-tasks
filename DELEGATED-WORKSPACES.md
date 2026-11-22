@@ -78,11 +78,11 @@ already funnels `write_roots: &[String]` into the `ContainerRequest` (`readwrite
    `$TMPDIR` — which both ends already agree on, so parent and child
    derive the same path even when their config roots differ); an accept
    loop serves one connection per request. On Windows
-   the endpoint is a real **AF_UNIX socket** (winsock `AF_UNIX`:
-   `bind`/`listen` plus a raw `accept` — std's own `TcpListener::accept`
-   rejects the AF_UNIX address family with EINVAL, so the listener wraps
-   the accepted handle in a `TcpStream` for framing); on Unix it is
-   `UnixListener`. Same path convention and same JSON-per-line wire on
+   the endpoint is a real **AF_UNIX socket** (winsock `AF_UNIX` through the
+   `uds_windows` crate's `UnixListener`/`UnixStream` — std's own
+   `TcpListener::accept` rejects the AF_UNIX address family with EINVAL,
+   which is exactly why an AF_UNIX-aware acceptor is needed); on Unix it is
+   std's `UnixListener`. Same path convention and same JSON-per-line wire on
    both platforms. One socket transports *all* of §B: `policy` fetch,
    `ask` relay, and the parent's `policy-update` push below.
 2. **Child side (asker).** `PIG_PARENT_SESSION` present ⇒ this session is
@@ -174,13 +174,13 @@ parent whose *listener* died while its session lives.
 | additive writable roots per spawn are expressible | `policy::writable_roots(mode, workspace_root, extra_roots)` already takes `extra_roots`; `runner/request.rs` already maps a `&[String]` onto `FilesystemPolicy.readwrite_paths` of `mxc_sdk::ContainerRequest` |
 | worktree git-dir derivation needs only file reads | `<cwd>/.git` directory → itself; `gitdir:` file → worktree git dir; its `commondir` file → shared git dir (the prototype lived in the Go port's `workspace.go`, removed in favor of this derivation) |
 | the approval channel is swappable without touching the ladder | `escalate::Ui.ask` is a boxed closure behind `has_ui`; `is_strictly_wider`/`validate_args`/the decision settlement are independent of transport |
-| the relay can run over a system socket from a tool call | std `env`/threads/`Instant`; **AF_UNIX on both platforms** (maintainer directive): `std::os::unix::net::UnixListener` on Unix, winsock `AF_UNIX` via the `windows` crate (`Win32_Networking_WinSock` feature) on Windows — proved end-to-end by `link::server` tests; long-blocking tool calls are the norm in this crate (bash) |
+| the relay can run over a system socket from a tool call | std `env`/threads/`Instant`; **AF_UNIX on both platforms** (maintainer directive): `std::os::unix::net::UnixListener` on Unix, the `uds_windows` crate's `UnixListener` (winsock `AF_UNIX`) on Windows — proved end-to-end by `link::server` tests; long-blocking tool calls are the norm in this crate (bash) |
 | the parent side can ask its user from a connection thread | `Context::select(...)` / `Context::input(...)` are plain host calls over the thread-safe `Connection` (the same pair the local dialog uses, `block_for_user` a no-op outside a tool call); the relay is exercised in-crate through an injected approver — a **live TUI dialog is still unverified** |
 | headless is already detectable | `ctx.has_ui()` is used at `ext/mod.rs:102`; `Ui::headless()` is the current stub |
 
 The §A/§C rows were verified by inspection only (no `cargo`, no `mxc`); §B's rows were later compiled and
 tested in-crate (see the status line) — including the std `accept` caveat, which probing proved: Windows AF_UNIX
-needs a raw winsock `accept`, not `std::net::TcpListener::accept`.
+needs an AF_UNIX-aware accept, not `std::net::TcpListener::accept` (the `uds_windows` crate provides it).
 
 ## 5. Test plan (smoke-matrix style, gates E1–E10 + R11 extended)
 

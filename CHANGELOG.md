@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.3.3] - 2026-11-22
+
+- **Windows link transport swapped for the `uds_windows` crate, and the two per-platform
+  transport files collapsed into one** (`link::transport`): the hand-rolled winsock code
+  (`WSAStartup`, `sockaddr_un` packing, raw `bind`/`listen`/`accept`/
+  `connect`, wrapping the accepted handle in a `TcpStream`) is gone — the Windows build now uses
+  `uds_windows::UnixListener`/`UnixStream`, the std-shaped AF_UNIX lookalikes. With both
+  platforms on the std-shaped API, `transport_unix.rs` + `transport_win.rs` are one file whose
+  only `cfg` difference is the type import (plus Unix's 0600 socket mode). Same socket: still
+  winsock `AF_UNIX` at `<osTempDir>/pig-sandbox-<id>.sock`, same JSON-per-line wire, same
+  stale-socket removal + trace on bind and listener `Drop`, same read/write timeouts
+  (`SO_RCVTIMEO`/`SO_SNDTIMEO`, as `TcpStream` set them). The std `TcpListener::accept` caveat
+  that motivated the raw `accept` is unchanged — `uds_windows` does the AF_UNIX-aware accept.
+  The `windows` crate keeps its job-object/process features; `Win32_Networking_WinSock` is no
+  longer needed (pinned `=1.2.1`, E9-style).
+- Tests: unchanged — full suite green on Windows (119 unit + 14 smoke, the link suite binding
+  real sockets) and the `x86_64-unknown-linux-gnu` cross-check stays clean.
+
 ## [0.3.2] - 2026-11-21
 
 - **Link diagnostics (logging only — no behavior change)**, grown out of the 2026-11-21 orphan-socket

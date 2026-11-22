@@ -1,9 +1,23 @@
-//! AF_UNIX transport on Unix: std's `UnixListener`/`UnixStream`, the same
-//! filesystem-socket convention the Windows build implements over winsock.
+//! The link's OS transport: one filesystem AF_UNIX socket per endpoint on
+//! every platform — std's `UnixListener`/`UnixStream` on Unix, the
+//! `uds_windows` crate's lookalike types over winsock `AF_UNIX` on Windows
+//! (maintainer directive: AF_UNIX, not named pipes; the same
+//! `net.Listen("unix")` shape the Go link uses). Both platforms share this
+//! one file — only the type imports below are `cfg`-swapped.
+//!
+//! std's own `TcpListener::accept` parses the returned `sockaddr_storage`
+//! and rejects the AF_UNIX address family with `EINVAL` (probed on this
+//! host), which is why an AF_UNIX-aware acceptor is needed on Windows at
+//! all: that is precisely what `uds_windows` provides.
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use uds_windows::{UnixListener, UnixStream};
 
 use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,8 +29,8 @@ pub struct Listener {
 
 impl Listener {
     /// Bind + listen at `path`, removing a stale socket file of a crashed
-    /// session first. The parent directory is created if missing and the
-    /// socket is user-only (0600), like the Go link.
+    /// session first. The parent directory is created if missing and, on
+    /// Unix, the socket is user-only (0600), like the Go link.
     pub fn bind(path: &Path) -> io::Result<Listener> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
@@ -32,6 +46,7 @@ impl Listener {
             }
         }
         let inner = UnixListener::bind(path)?;
+        #[cfg(unix)]
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         Ok(Listener { inner, path: path.to_path_buf() })
     }
@@ -46,8 +61,8 @@ impl Listener {
 impl Drop for Listener {
     fn drop(&mut self) {
         // A socket file that outlives its listener is exactly the
-        // "file present, connect refused" state — never swallow a
-        // removal failure.
+        // "file present, connect refused" state children dial into —
+        // never swallow a removal failure.
         if let Err(e) = std::fs::remove_file(&self.path) {
             if e.kind() != io::ErrorKind::NotFound {
                 crate::bg::dbg::trace(serde_json::json!({
