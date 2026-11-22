@@ -21,7 +21,16 @@ impl Listener {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let _ = std::fs::remove_file(path); // stale socket of a dead session
+        // Stale socket of a dead session — record a real failure (the
+        // "dead process left a file behind" state), ignore only ENOENT.
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                crate::bg::dbg::trace(serde_json::json!({
+                    "phase": "link_stale_socket_remove_failed",
+                    "path": path.to_string_lossy(), "err": e.to_string()
+                }));
+            }
+        }
         let inner = UnixListener::bind(path)?;
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
         Ok(Listener { inner, path: path.to_path_buf() })
@@ -36,7 +45,17 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // A socket file that outlives its listener is exactly the
+        // "file present, connect refused" state — never swallow a
+        // removal failure.
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                crate::bg::dbg::trace(serde_json::json!({
+                    "phase": "link_socket_remove_failed",
+                    "path": self.path.to_string_lossy(), "err": e.to_string()
+                }));
+            }
+        }
     }
 }
 

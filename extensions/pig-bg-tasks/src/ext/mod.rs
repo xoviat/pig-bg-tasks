@@ -243,6 +243,14 @@ pub fn build() -> Extension {
             extras: cfg.extra_writable_dirs,
         });
         crate::bg::lifecycle::render_status_pill(&reg);
+        // Diagnostic marker: the start handler ran to completion. If this
+        // extension's runner later dies without a `session_shutdown`, this
+        // line is the last thing it wrote and bounds the death window.
+        crate::bg::dbg::trace(serde_json::json!({
+            "phase": "ext_session_start_done",
+            "session": ctx.get_session_id().unwrap_or_default(),
+            "pid": std::process::id()
+        }));
         None
     });
 
@@ -271,8 +279,13 @@ pub fn build() -> Extension {
         // already refused fail-closed by their own deadlines, the socket
         // files are removed, and a nested child's inherited policy is
         // dropped with this session's identity.
-        crate::link::server::stop();
+        crate::link::server::stop_with("session_shutdown");
         crate::policy::inherit::clear();
+        crate::bg::dbg::trace(serde_json::json!({
+            "phase": "ext_session_shutdown_done",
+            "session": ctx.get_session_id().unwrap_or_default(),
+            "pid": std::process::id()
+        }));
         None
     });
 

@@ -75,7 +75,17 @@ impl Listener {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let _ = std::fs::remove_file(path); // stale socket of a dead session
+        // Stale socket of a dead session. A failure here (other than
+        // "never existed") is exactly the state where a dead process left
+        // a file behind — record it instead of dropping it on the floor.
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                crate::bg::dbg::trace(serde_json::json!({
+                    "phase": "link_stale_socket_remove_failed",
+                    "path": path.to_string_lossy(), "err": e.to_string()
+                }));
+            }
+        }
         let s = new_socket()?;
         let fail = |e: io::Error, s: SOCKET| -> io::Error {
             unsafe {
@@ -111,7 +121,17 @@ impl Drop for Listener {
         unsafe {
             let _ = WinSock::closesocket(self.sock);
         }
-        let _ = std::fs::remove_file(&self.path);
+        // A socket file that outlives its listener is precisely the
+        // "file present, connect refused" state children dial into —
+        // never swallow a removal failure.
+        if let Err(e) = std::fs::remove_file(&self.path) {
+            if e.kind() != io::ErrorKind::NotFound {
+                crate::bg::dbg::trace(serde_json::json!({
+                    "phase": "link_socket_remove_failed",
+                    "path": self.path.to_string_lossy(), "err": e.to_string()
+                }));
+            }
+        }
     }
 }
 

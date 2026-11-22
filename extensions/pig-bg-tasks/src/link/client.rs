@@ -201,14 +201,25 @@ pub fn ask_with_timeout(
         "op": "ask",
         "ask": ask.to_value(),
     });
-    let reply = request(
+    let reply = match request(
         parent_session,
         "parent",
         &payload,
         timeout,
         3,
         " — the escalation stays denied",
-    )?;
+    ) {
+        Ok(reply) => reply,
+        Err(e) => {
+            // Same visibility the policy fetch has (`link_policy_unreachable`):
+            // a refused escalation used to leave no trace on this side.
+            crate::bg::dbg::trace(json!({
+                "phase": "link_ask_unreachable", "parent": parent_session,
+                "ask": ask.uuid, "err": e
+            }));
+            return Err(e);
+        }
+    };
     let decision = reply
         .get("decision")
         .and_then(Value::as_str)

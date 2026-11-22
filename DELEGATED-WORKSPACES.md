@@ -15,7 +15,7 @@ recent delegation session was forced into. The companion half is one generic mar
 (`../pigpen/components/subagents/extensions/pi-subagents/parent.go`) stamps every delegated child with
 `PIG_PARENT_SESSION` (§2) and nothing else. All policy, transport, and semantics live here.
 
-## 1. Why: three observed failure modes
+## 1. Why: four observed failure modes
 
 A parent session delegated three tasks into git worktrees it created under the repository's `tmp/`. Each child was a
 `pig` process whose bash tool runs under this sandbox family. Observed failures:
@@ -25,8 +25,9 @@ A parent session delegated three tasks into git worktrees it created under the r
 | F1 | git writes denied in a worktree | `git checkout` denied (index lock in the shared repo); a child committed into a **stranded local repo** (`<worktree>/tmp/lcgit`) and printed manual landing steps | a linked worktree's `.git` file points into the parent repository's git dir; the sandbox writable set is the workspace (+ `%TEMP%`), so every shared-`.git` write is denied |
 | F2 | shared build roots unreachable | a child copied **279 MB** of Qt/deps into its worktree because `tmp/`, `_fc_src/` (git-ignored, outside the workspace) were not writable/readable there | no derivation or configuration of the shared roots a delegated task legitimately needs |
 | F3 | escalation dead-ends headless | `sandbox escalation to "danger-full-access" requires approval, but no approval channel is available — nothing was executed` | the approval dialogue is a host UI dialog (`escalate::Ui.ask`); headless contexts have none, and there is no relay |
+| F4 | parent link serves nothing (orphan socket, observed 2026-11-21) | a child's `op:"policy"`/`op:"ask"` dial fails `No connection could be made because the target machine actively refused it. (os error 10061)` while `%TEMP%\pig-sandbox-<parent>.sock` still exists on disk | the parent's extension runner died without `session_shutdown` (host: `extension "pig-bg-tasks" disabled: packed member connection closed; /reload restarts it`), so the socket file outlives the listener; fail-closed on the child side. Diagnose from `ext_session_start_done` → `link_accept_thread_*` → `link_served` → `link_stopped{session,reason}` in `%TEMP%\pi-bg-tasks\bash-calls.jsonl` (0.3.2) — the incident's trace could not attribute its `link_stopped` lines |
 
-F3 is the only failure with no legal workaround today; F1/F2 forced fragile ones.
+F3 is the only failure with no legal workaround today; F1/F2 forced fragile ones, and F4's is the host-side `/reload`.
 
 ## 2. The contract (pi-subagents side: done)
 

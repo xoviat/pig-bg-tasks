@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.3.2] - 2026-11-21
+
+- **Link diagnostics (logging only — no behavior change)**, grown out of the 2026-11-21 orphan-socket
+  incident: a parent's extension runner died without `session_shutdown`, its `%TEMP%/pig-sandbox-<id>.sock`
+  file outlived the listener, and every child dial failed `os error 10061` while the trace could not say
+  whose `link_stopped` belonged to whom or when the listener actually died. Now:
+  - `link_started` carries `endpoint` + `pid`; `link_stopped` carries `session`, `reason`
+    (`session_shutdown` vs the `restart` inside `start` vs plain `stop`), `endpoints`, and
+    `thread_exited` — a stop whose accept thread missed the 2 s window additionally traces
+    `link_stop_timeout` instead of pretending to be clean.
+  - accept-thread lifecycle: `link_accept_thread_started` at bind, `link_accept_thread_exited`
+    (`why: "stopped" | "panicked"` + panic payload) — a panic in the accept loop previously killed
+    the listener without a trace.
+  - `link_served {op}` per answered request: positive evidence this process's listener answered,
+    separating "alive but never asked" from "gone" after the fact; `link_version_mismatch` for
+    refused frames.
+  - ignored filesystem failures are no longer silent: `link_stale_socket_remove_failed` (bind) and
+    `link_socket_remove_failed` (listener Drop) — the exact "file present, connect refused" state.
+  - extension lifecycle markers `ext_session_start_done` / `ext_session_shutdown_done` (session +
+    pid) bound the death window of a runner that never got its shutdown event.
+  - child side: a refused escalation now traces `link_ask_unreachable {parent, ask, err}` alongside
+    the existing `link_policy_unreachable`.
+- Tests: +1 (`lifecycle_trace_is_attributable`) — 119 unit + 14 smoke green.
+
 ## [0.3.1] - 2026-11-21
 
 - **One socket per session, in the OS temp dir** (`DELEGATED-WORKSPACES.md` §B): the link's

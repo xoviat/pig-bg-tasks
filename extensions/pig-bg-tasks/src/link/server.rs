@@ -101,7 +101,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// any listener a previous session in this process left behind, and starts
 /// the child registry over — the new session has no children yet.
 pub fn start(opts: ServerOpts) -> Vec<PathBuf> {
-    stop(); // also forgets the previous session's children
+    stop_with("restart"); // also forgets the previous session's children
     let path = link::endpoint(&opts.session_id);
     let opts = Arc::new(opts);
     let stopped = Arc::new(AtomicBool::new(false));
@@ -119,10 +119,40 @@ pub fn start(opts: ServerOpts) -> Vec<PathBuf> {
                 let o = opts.clone();
                 let stop = stopped.clone();
                 let tx = exited_tx.clone();
+                let thread_session = opts.session_id.clone();
+                let thread_endpoint = path.clone();
+                crate::bg::dbg::trace(json!({
+                    "phase": "link_accept_thread_started", "session": opts.session_id,
+                    "endpoint": path.to_string_lossy(), "pid": std::process::id()
+                }));
                 // The thread owns the listener (and removes the socket file
                 // on exit), so `stop` wakes it with a dummy connect.
                 std::thread::spawn(move || {
-                    accept_loop(listener, o, stop);
+                    // A panic in the accept loop would otherwise kill the
+                    // listener silently (the socket file survives on
+                    // Windows) — record WHY the thread is going away.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        accept_loop(listener, o, stop)
+                    }));
+                    let mut rec = serde_json::Map::new();
+                    rec.insert("phase".into(), json!("link_accept_thread_exited"));
+                    rec.insert("session".into(), json!(thread_session));
+                    rec.insert("endpoint".into(), json!(thread_endpoint.to_string_lossy()));
+                    match outcome {
+                        Ok(()) => {
+                            rec.insert("why".into(), json!("stopped"));
+                        }
+                        Err(payload) => {
+                            let msg = payload
+                                .downcast_ref::<&str>()
+                                .map(|s| (*s).to_string())
+                                .or_else(|| payload.downcast_ref::<String>().cloned())
+                                .unwrap_or_else(|| "<non-string panic payload>".into());
+                            rec.insert("why".into(), json!("panicked"));
+                            rec.insert("payload".into(), json!(msg));
+                        }
+                    }
+                    crate::bg::dbg::trace(Value::Object(rec));
                     let _ = tx.send(());
                 });
             }
@@ -140,7 +170,8 @@ pub fn start(opts: ServerOpts) -> Vec<PathBuf> {
         opts: opts.clone(),
     });
     crate::bg::dbg::trace(json!({
-        "phase": "link_started", "session": opts.session_id, "endpoints": bound.len()
+        "phase": "link_started", "session": opts.session_id, "endpoints": bound.len(),
+        "endpoint": path.to_string_lossy(), "pid": std::process::id()
     }));
     bound
 }
@@ -148,20 +179,51 @@ pub fn start(opts: ServerOpts) -> Vec<PathBuf> {
 /// Wake the accept loop and wait briefly for the thread to release its
 /// endpoint (the socket file goes with it).
 pub fn stop() {
+    stop_with("stop")
+}
+
+/// [`stop`] with the caller's reason, recorded in the trace so a later
+/// reader can tell a `session_shutdown` from the `restart` inside
+/// [`start`] — the incident this grew out of had three unattributable
+/// `link_stopped` lines and no way to tell whose link each belonged to.
+pub fn stop_with(reason: &str) {
     let previous = lock(&RUNNING).take();
     lock(&CHILDREN).clear();
     let Some(running) = previous else { return };
+    let session = running.opts.session_id.clone();
+    let paths: Vec<String> = running
+        .paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     running.stopped.store(true, Ordering::SeqCst);
     // A dummy connection unblocks a listener parked in accept().
     for path in &running.paths {
         let _ = Stream::connect(path);
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    // Did the accept thread actually release its endpoint before the
+    // window closed? Reporting a clean stop when it did not hides the
+    // state where a stale listener outlives this `stop`.
+    let mut thread_exited = true;
     for _ in &running.paths {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let _ = running.exited.recv_timeout(remaining);
+        match running.exited.recv_timeout(remaining) {
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => thread_exited = false,
+        }
     }
-    crate::bg::dbg::trace(json!({"phase": "link_stopped", "session_endpoints": running.paths.len()}));
+    if !thread_exited {
+        crate::bg::dbg::trace(json!({
+            "phase": "link_stop_timeout", "session": session, "reason": reason,
+            "endpoints": paths, "pid": std::process::id()
+        }));
+    }
+    crate::bg::dbg::trace(json!({
+        "phase": "link_stopped", "session": session, "reason": reason,
+        "session_endpoints": running.paths.len(), "thread_exited": thread_exited,
+        "endpoints": paths
+    }));
 }
 
 /// Whether this session's link is serving.
@@ -288,9 +350,15 @@ fn err(msg: &str) -> Value {
 fn dispatch(req: &Value, opts: &ServerOpts) -> Value {
     let v = req.get("v").and_then(Value::as_u64).unwrap_or(0);
     if v != PROTOCOL_VERSION {
+        crate::bg::dbg::trace(json!({"phase": "link_version_mismatch", "v": v}));
         return err(&format!("unsupported link version {v} (expected {PROTOCOL_VERSION})"));
     }
-    match req.get("op").and_then(Value::as_str).unwrap_or("") {
+    let op = req.get("op").and_then(Value::as_str).unwrap_or("");
+    // Positive evidence that THIS process served a request on its socket:
+    // the trace distinguishes "listener alive but never asked" from
+    // "listener gone" after the fact.
+    crate::bg::dbg::trace(json!({"phase": "link_served", "op": op}));
+    match op {
         "policy" => {
             // The child that asked is now reachable on its own socket —
             // the fan-out set for [`broadcast_policy`].
@@ -445,6 +513,53 @@ mod tests {
         assert!(children().is_empty(), "a stopped link forgets its children");
         // no listener → fail closed (None), not a panic
         assert!(client::fetch_policy("sess-policy", "child-1").is_none());
+    }
+
+    /// Every lifecycle event carries the identity needed to attribute it:
+    /// session, endpoint, pid, and (for stops) the reason. The 2026-11-21
+    /// orphan-socket incident had three bare `link_stopped` lines and no
+    /// way to tell whose link each belonged to.
+    #[test]
+    fn lifecycle_trace_is_attributable() {
+        let _t = crate::link::test_mu::lock();
+        let sid = "sess-attrib";
+        start(opts(sid));
+        let _ = client::fetch_policy(sid, "child-attrib");
+        stop_with("test-shutdown");
+
+        let tail = crate::bg::dbg::tail(400);
+        let seen = |phase: &str, pred: &dyn Fn(&Value) -> bool| {
+            tail.iter()
+                .any(|r| r.get("phase").and_then(Value::as_str) == Some(phase) && pred(r))
+        };
+        assert!(
+            seen("link_started", &|r| {
+                r["session"] == sid && r["pid"].is_u64() && r["endpoint"].is_string()
+            }),
+            "link_started names session/pid/endpoint"
+        );
+        assert!(
+            seen("link_accept_thread_started", &|r| r["session"] == sid),
+            "accept thread start is recorded"
+        );
+        assert!(
+            seen("link_served", &|r| r["op"] == "policy"),
+            "a served request is positive evidence the listener answered"
+        );
+        assert!(
+            seen("link_accept_thread_exited", &|r| {
+                r["session"] == sid && r["why"] == "stopped"
+            }),
+            "accept thread exit reason is recorded"
+        );
+        assert!(
+            seen("link_stopped", &|r| {
+                r["session"] == sid
+                    && r["reason"] == "test-shutdown"
+                    && r["thread_exited"] == true
+            }),
+            "link_stopped carries session + reason + thread outcome"
+        );
     }
 
     /// The ask reaches the parent's dialog intact and the verdict comes

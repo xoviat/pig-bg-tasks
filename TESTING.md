@@ -189,7 +189,7 @@ Two traps observed in that run's log — assert accordingly:
 |---|---|---|
 | registration | `pig install . --validate-only --json` (real home, `PIG_CELL_BUILD_TIMEOUT=40m`) | `"valid": true, "registered": true`; **4 tools** (`bash`, `bg_list`, `bg_output`, `bg_stop` — deliberately no approval tools) + 3 commands |
 | piped session | `pig-tmp/smoke-rs-harness.log` (real home — see §7's PIG_HOME collision) | `echo HARNESS_OK` → `HARNESS_OK`; `bg_list` → `No background jobs`; no `Extension error` |
-| link lifecycle | `%TEMP%\pi-bg-tasks\bash-calls.jsonl` | expect `link_started {"session":"01a1fc61-…","endpoints":1}` at session start and `link_stopped {"session_endpoints":1}` at shutdown (7 s session) — one socket per session now, in the OS temp dir — with `%TEMP%\pig-sandbox-<sessionId>.sock` removed on exit |
+| link lifecycle | `%TEMP%\pi-bg-tasks\bash-calls.jsonl` | expect `link_started {"session":"01a1fc61-…","endpoints":1,"endpoint":"…pig-sandbox-<id>.sock","pid":N}` + `link_accept_thread_started` at session start, `link_served {"op":…}` per answered request, and `link_stopped {"session":…,"reason":"session_shutdown","thread_exited":true}` at shutdown (7 s session) — one socket per session now, in the OS temp dir — with `%TEMP%\pig-sandbox-<sessionId>.sock` removed on exit; `link_stop_timeout`/`link_accept_thread_exited {"why":"panicked"}`/`link_socket_remove_failed` mark the states where a socket file can outlive its listener (0.3.2) |
 | cross-platform | `cargo check --target x86_64-unknown-linux-gnu --all-targets` | clean (the `cfg(unix)` transport compiles) |
 
 Environment facts for future prompts:
