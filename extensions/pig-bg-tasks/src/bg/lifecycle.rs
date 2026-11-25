@@ -121,8 +121,40 @@ pub fn finish_foreground_job(reg: &Registry, job: &Arc<Job>, exit: Exit) {
 pub fn promote_to_background(reg: &Registry, tool_call_id: &str, job: &Arc<Job>, should_notify: bool) {
     reg.remove_foreground(tool_call_id);
     job.set_backgrounded(true);
+    // First call wins: stamps WHEN the job became a background job, which
+    // both identifies it as "backgrounded, not launched background" and
+    // starts its hung-check clock.
+    job.mark_promoted();
     reg.mark_started();
     start_background_job(reg, job, should_notify);
+    if should_notify {
+        // Arm the 10-minute hung check (suppressed with the completion
+        // notification — should_notify=false means no notifications at all).
+        start_hung_watcher(reg, job);
+    }
+}
+
+/// Arm the one-shot hung check at the production threshold.
+pub fn start_hung_watcher(reg: &Registry, job: &Arc<Job>) {
+    start_hung_watcher_with(
+        reg,
+        job,
+        Duration::from_millis(crate::bg::HUNG_NOTIFY_AFTER_MS),
+    );
+}
+
+/// One-shot: sleep out the threshold, then let
+/// [`notify::send_hung_notification`] re-check eligibility (still running,
+/// actually backgrounded, latched once). A task that finished — or was
+/// stopped — during the wait sends nothing; a task launched with
+/// `run_in_background=true` never arms this watcher at all.
+fn start_hung_watcher_with(reg: &Registry, job: &Arc<Job>, after: Duration) {
+    let reg = reg.clone();
+    let job = job.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(after);
+        notify::send_hung_notification(&reg, &job);
+    });
 }
 
 /// Record the stop reason and kill the tree (job object on Windows — the
@@ -365,6 +397,79 @@ mod tests {
         // job already terminal → not counted as running_bg; done counted on forget
         assert_eq!(running_bg, 0);
         assert_eq!(done, 1);
+    }
+
+    #[test]
+    fn hung_threshold_is_ten_minutes() {
+        assert_eq!(
+            crate::bg::HUNG_NOTIFY_AFTER_MS,
+            10 * 60 * 1000,
+            "the nag fires 10 minutes after the promotion"
+        );
+    }
+
+    #[test]
+    fn promotion_stamps_the_clock_and_launch_background_has_none() {
+        let reg = Registry::new();
+        let handle = Arc::new(MockHandle::running());
+        let job = reg.new_running_job(
+            "bash-hp1", "cmd", Some(handle.clone()), "/tmp/hp.log", "tc", "", false,
+        );
+        reg.set_foreground("tc", crate::bg::registry::ForegroundSlot::new(|_| {}));
+        // should_notify=false → this test never arms the 10-minute thread
+        promote_to_background(&reg, "tc", &job, false);
+        assert!(job.is_backgrounded());
+        assert!(job.promoted_at().is_some(), "promotion starts the hung clock");
+        // a task launched as a background task never carries a promotion
+        // instant — that is exactly what exempts it from the hung check
+        let launched = reg.new_running_job(
+            "bash-hp2", "cmd", None, "/tmp/hp.log", "", "", true,
+        );
+        assert!(launched.is_backgrounded());
+        assert!(launched.promoted_at().is_none());
+    }
+
+    #[test]
+    fn hung_watcher_nags_a_still_running_promoted_task() {
+        let reg = Registry::new();
+        let port = Arc::new(MockPort::new());
+        reg.set_notifier(port.clone() as Arc<dyn SdkPort>);
+        let handle = Arc::new(MockHandle::running());
+        let job = reg.new_running_job(
+            "bash-hw1", "sleep 999", Some(handle.clone()), "/tmp/hw.log", "tc", "", false,
+        );
+        job.mark_promoted();
+        start_hung_watcher_with(&reg, &job, Duration::from_millis(30));
+        assert!(
+            wait_until(2_000, || port.send_count() == 1),
+            "the hung notification must fire"
+        );
+        {
+            let sent = crate::bg::glock(&port.sent);
+            assert_eq!(sent[0].0, crate::bg::notify::TASK_HUNG_NOTIFICATION_CUSTOM_TYPE);
+            assert!(sent[0].1.contains("bg_list"), "{}", sent[0].1);
+            assert!(sent[0].1.contains("bg_stop"), "{}", sent[0].1);
+        }
+        assert!(job.hung_notified());
+        assert!(!job.notified(), "the completion latch stays clean");
+        assert!(reg.find_job("bash-hw1").is_some(), "still live — it is running");
+        handle.finish(Exit::code(0));
+    }
+
+    #[test]
+    fn hung_watcher_is_silent_for_a_task_finished_during_the_wait() {
+        let reg = Registry::new();
+        let port = Arc::new(MockPort::new());
+        reg.set_notifier(port.clone() as Arc<dyn SdkPort>);
+        let job = reg.new_running_job(
+            "bash-hw2", "make", None, "/tmp/hw2.log", "tc", "", false,
+        );
+        job.mark_promoted();
+        job.mark_terminal(JobStatus::Completed, Some(0));
+        start_hung_watcher_with(&reg, &job, Duration::from_millis(30));
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(port.send_count(), 0, "a finished task never earns the nag");
+        assert!(!job.hung_notified(), "no latch burned");
     }
 
     #[test]

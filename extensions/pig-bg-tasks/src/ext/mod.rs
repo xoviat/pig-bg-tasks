@@ -20,6 +20,32 @@ use serde_json::Value;
 
 use port::port_for;
 
+/// The shared one-line renderer for both notification types: `● summary`
+/// truncated to `width`, read from `details.summary` with the raw content
+/// as fallback.
+fn summary_line(message: Value, width: u32) -> Result<Vec<String>, String> {
+    let mut summary = message
+        .pointer("/details/summary")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    if summary.is_none() {
+        summary = message
+            .get("content")
+            .and_then(Value::as_str)
+            .map(String::from);
+    }
+    let mut line = format!("● {}", summary.unwrap_or_default());
+    if width > 0 {
+        let w = width as usize;
+        if line.chars().count() > w {
+            let head: String = line.chars().take(w.saturating_sub(1)).collect();
+            line = format!("{head}…");
+        }
+    }
+    Ok(vec![line])
+}
+
 /// Build the factory's extension (E7 scaffold pattern: no `main` — pig
 /// drives `Extension::run`).
 pub fn build() -> Extension {
@@ -54,31 +80,15 @@ pub fn build() -> Extension {
         },
     );
 
-    // <task-notification> renders as one line: ● summary.
+    // <task-notification> and <task-hung-notification> render as one line:
+    // ● summary.
     ext.message_renderer(
         crate::bg::notify::TASK_NOTIFICATION_CUSTOM_TYPE,
-        |_ctx, message: Value, _options, width| {
-            let mut summary = message
-                .pointer("/details/summary")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(String::from);
-            if summary.is_none() {
-                summary = message
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(String::from);
-            }
-            let mut line = format!("● {}", summary.unwrap_or_default());
-            if width > 0 {
-                let w = width as usize;
-                if line.chars().count() > w {
-                    let head: String = line.chars().take(w.saturating_sub(1)).collect();
-                    line = format!("{head}…");
-                }
-            }
-            Ok(vec![line])
-        },
+        |_ctx, message: Value, _options, width| summary_line(message, width),
+    );
+    ext.message_renderer(
+        crate::bg::notify::TASK_HUNG_NOTIFICATION_CUSTOM_TYPE,
+        |_ctx, message: Value, _options, width| summary_line(message, width),
     );
 
     // ── Steering auto-background ─────────────────────────────────────

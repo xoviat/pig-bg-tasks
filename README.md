@@ -76,13 +76,24 @@ Rules that are easy to get wrong (full recipe: **`TESTING.md`**):
 | `bg_stop` | Job-object terminate (whole tree) + bounded wait; latches silently first, returns real outcome. |
 
 Commands: `/sandbox [mode]` (process-wide, with completions), `/bg`, `/bg-tasks`.
-Shortcut: `Ctrl+Shift+B`. Message renderer: `<task-notification>` (one `● summary` line).
+Shortcut: `Ctrl+Shift+B`. Message renderers: `<task-notification>` and
+`<task-hung-notification>` (one `● summary` line each).
 Steering (Enter mid-stream) auto-backgrounds running foreground commands.
 
 Notifications are **exactly-once** via a check-and-set latch before send: any path that already
 surfaced the outcome (`bg_output`/`bg_stop`, deliberate kill) suppresses it; a failed send is lost,
 never retried. **User-initiated stops emit zero notifications by design.** Delivery is
 `deliverAs=steer, triggerTurn=true` through a retained SDK context.
+
+**Hung-task check**: a command that was *not* launched with `run_in_background` but was backgrounded
+(timeout auto-background, `Ctrl+Shift+B`, steering) and is **still running 10 minutes later** gets one
+extra steered notification — `<task-hung-notification>` (`<backgrounded_for>`, `<running_for>`,
+`<tail_preview>`, and the instruction *"Call bg_list to see all tasks, then call bg_stop for any hung
+tasks."*) — telling the model to `bg_list` and then `bg_stop` any hung tasks. Exactly-once per task
+(its own `hung_notified` latch, independent of the completion latch — it can neither steal nor be
+stolen by a completion); a task that finished or was stopped during the 10-minute window sends
+nothing, and tasks launched with `run_in_background=true` are exempt by design: they are intentional,
+not backgrounded-against-the-model's-plan.
 
 Logs: `%TEMP%\pi-bg-tasks\<taskId>.log` (the temp root is inside the workspace-write grant — a
 confined child writes its own log). Bare spawns are fd-direct (kernel moves the bytes); confined

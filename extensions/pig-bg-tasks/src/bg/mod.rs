@@ -43,6 +43,12 @@ pub const RECENT_TERMINAL_KEEP: usize = 20;
 pub const MAX_CONCURRENT_JOBS: usize = 16;
 pub const STALE_LOG_MAX_AGE_SECS: u64 = 24 * 60 * 60;
 pub const FOREGROUND_TAIL_BYTES: i64 = 4_096;
+/// A task that was backgrounded from the foreground (timeout auto-background,
+/// Ctrl+Shift+B, steering) and is STILL RUNNING this long afterwards earns a
+/// "possibly hung" notification telling the model to `bg_list` + `bg_stop`.
+/// Tasks launched with `run_in_background=true` are exempt by design — they
+/// are intentional.
+pub const HUNG_NOTIFY_AFTER_MS: u64 = 10 * 60 * 1000;
 
 /// Lock helper that tolerates poisoning: Go's locks never panic, and debug
 /// output / status rendering must not be able to take the extension down.

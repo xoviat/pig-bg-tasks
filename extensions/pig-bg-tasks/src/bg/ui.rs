@@ -80,7 +80,7 @@ pub fn pause_all_foreground(reg: &Registry, reason: BackgroundReason) -> bool {
 }
 
 /// "45s" / "3m20s".
-fn format_duration(ms: u128) -> String {
+pub(crate) fn format_duration(ms: u128) -> String {
     let total = ms / 1000;
     let m = total / 60;
     let s = total % 60;

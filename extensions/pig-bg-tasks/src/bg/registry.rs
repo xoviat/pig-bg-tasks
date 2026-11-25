@@ -71,6 +71,13 @@ struct JobState {
     exit_code: Option<i32>,
     notified: bool,
     is_backgrounded: bool,
+    /// When a foreground command was backgrounded (manual/timeout/steer).
+    /// `None` = launched as a background task (`run_in_background`) or still
+    /// foreground — exactly the distinction the hung-task check needs.
+    promoted_at: Option<Instant>,
+    /// Exactly-once latch for the "still running after 10m" notification
+    /// (independent of the completion latch `notified`).
+    hung_notified: bool,
     stop_reason: String,
 }
 
@@ -120,6 +127,37 @@ impl Job {
 
     pub fn is_backgrounded(&self) -> bool {
         glock(&self.state).is_backgrounded
+    }
+
+    /// When this job was backgrounded from the foreground; `None` when it
+    /// was launched as a background task (or never backgrounded at all).
+    pub fn promoted_at(&self) -> Option<Instant> {
+        glock(&self.state).promoted_at
+    }
+
+    /// Record the promotion instant (first call wins, like the terminal
+    /// flip — a repeated promotion cannot reset the hung-check clock).
+    pub fn mark_promoted(&self) {
+        let mut st = glock(&self.state);
+        if st.promoted_at.is_none() {
+            st.promoted_at = Some(Instant::now());
+        }
+    }
+
+    /// Atomic check-and-set for the hung-task notification latch: returns
+    /// true iff this call performed the transition.
+    pub fn try_latch_hung_notified(&self) -> bool {
+        let mut st = glock(&self.state);
+        if st.hung_notified {
+            return false;
+        }
+        st.hung_notified = true;
+        true
+    }
+
+    /// Whether the hung-task notification was already surfaced (or lost).
+    pub fn hung_notified(&self) -> bool {
+        glock(&self.state).hung_notified
     }
 
     pub fn set_backgrounded(&self, v: bool) {
@@ -316,6 +354,8 @@ impl Registry {
                 exit_code: None,
                 notified: false,
                 is_backgrounded: backgrounded,
+                promoted_at: None,
+                hung_notified: false,
                 stop_reason: String::new(),
             }),
             done: Mutex::new(false),

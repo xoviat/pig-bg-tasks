@@ -217,7 +217,7 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cargo test                                 # extensions/pig-bg-tasks, single crate: 118 unit tests + 14 smoke tests (132 total)
+cargo test                                 # extensions/pig-bg-tasks, single crate: 127 unit tests + 14 smoke tests (141 total)
 rustup target add x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
     # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean

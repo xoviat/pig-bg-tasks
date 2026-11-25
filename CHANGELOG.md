@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.4] - 2026-11-25
+
+- **Hung-task notification**: a command that was *not* launched with `run_in_background` but was
+  backgrounded later (timeout auto-background, `Ctrl+Shift+B`, steering) and is **still running 10
+  minutes after the promotion** now earns one extra steered notification (`bg-task-hung-notification`,
+  rendered as a `● summary` line like `<task-notification>`). Its `<task-hung-notification>` XML carries
+  `<backgrounded_for>` / `<running_for>` / `<tail_preview>` and the model-facing instruction *"Call bg_list
+  to see all tasks, then call bg_stop for any hung tasks."* — so the model wakes up, lists the tasks and
+  stops the hung ones. Mechanism: `promote_to_background` stamps a new `Job::promoted_at` (first call
+  wins) and arms a one-shot watcher thread at `HUNG_NOTIFY_AFTER_MS` (10 min); `notify::send_hung_notification`
+  re-checks eligibility (still running, actually backgrounded) and takes its own `hung_notified` latch
+  BEFORE the send — independent of the completion latch, so the two notifications can neither steal nor
+  be stolen from each other. Exactly-once per task, lost-not-retried on send failure or missing notifier
+  (same policy as completions); a task that finished or was stopped during the 10-minute window sends
+  nothing, and `session_shutdown`'s silent kill qualifies as "stopped". Tasks launched with
+  `run_in_background=true` never arm the watcher and are refused by the sender even if called directly
+  (`promoted_at` stays `None`) — they are intentional, not backgrounded-against-the-model's-plan.
+- Tests: +8 (4 `notify` — eligibility gate, XML/instruction shape, exactly-once with latch independence,
+  terminal/no-notifier suppression; 4 `lifecycle` — the 10-minute threshold constant, promotion stamps
+  the clock while launch-background jobs have none, the watcher nags a still-running promoted task,
+  silence for a task finished during the wait) — 127 unit + 14 smoke green.
+
 ## [0.3.3] - 2026-11-22
 
 - **Windows link transport swapped for the `uds_windows` crate, and the two per-platform
