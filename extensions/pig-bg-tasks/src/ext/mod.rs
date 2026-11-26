@@ -240,6 +240,15 @@ pub fn build() -> Extension {
                 }),
                 approver,
                 on_policy_update,
+                // What an `op:"watch-tasks"` subscriber is told: this
+                // session is busy while ANY task in the registry runs
+                // (background *and* foreground calls register there), and
+                // not busy once none is. The registry fires the flip
+                // (`link::server::broadcast_busy`) on every start/exit.
+                tasks_busy: std::sync::Arc::new(|| {
+                    let (running, _, _) = Registry::shared().snapshot();
+                    !running.is_empty()
+                }),
             });
         }
         // CONVERGENCE: synchronous now — initial epoch = startup policy state

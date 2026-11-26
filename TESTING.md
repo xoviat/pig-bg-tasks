@@ -217,13 +217,13 @@ isolation.
 ## 6. Unit + smoke tests (cargo)
 
 ```bash
-cargo test                                 # extensions/pig-bg-tasks, single crate: 127 unit tests + 14 smoke tests (141 total)
+cargo test                                 # extensions/pig-bg-tasks, single crate: 130 unit tests + 14 smoke tests + 1 Go-client test (145 total)
 rustup target add x86_64-unknown-linux-gnu
 cargo check --target x86_64-unknown-linux-gnu --all-targets   # cross-platform gate (2026-10-25): the
     # `windows` dep is target-gated + POSIX fallbacks in place; must stay clean
 ```
 
-The parent-link suite (`link::*`, 13 tests, plus 4 `policy::inherit`
+The parent-link suite (`link::*`, 17 tests, plus 4 `policy::inherit`
 tests) is part of the unit run: AF_UNIX framing + the single tmp-dir
 endpoint derivation (`<osTempDir>/pig-sandbox-<id>.sock`), `policy` over
 the socket, ask → the parent's dialog verdict (allow / deny-with-reason /
@@ -232,11 +232,29 @@ cancel / headless-parent refusal), `escalate::approve` over the socket
 and policy **mirroring** (mode baseline + roots) — plus the propagation
 pair: a permission-level change fanning out to a child's own socket
 (narrow *and* widen, two listeners in one process) and
-`inherit::apply_update` accepting only the mirroring session's frame. It
-binds real sockets under the OS temp dir — run it unconfined like the
-rest of §6 (see §7's note). The `bg::dbg` trace test tolerates the link
-tests' concurrent appends to the shared
+`inherit::apply_update` accepting only the mirroring session's frame.
+On top of that, the **task busy-state watch** (0.3.5): the
+`op:"watch-tasks"` ack snapshot + both flip directions on one open
+connection, the quiet-not-dead gap (no flip ⇒ no frame), an unwatched
+flip still told to a late subscriber, `stop_with` closing every
+subscription, the registry's own start/exit hooks flipping a watcher's
+state with no explicit broadcast, and the 32-subscription cap refusing
+one too many. It binds real sockets under the OS temp dir — run it
+unconfined like the rest of §6 (see §7's note). The `bg::dbg` trace test
+tolerates the link tests' concurrent appends to the shared
 `%TEMP%\pi-bg-tasks\bash-calls.jsonl`.
+
+### Go client verification (`tests/go_watch.rs`)
+
+One integration test proves the notifications cross the wire to a
+**non-Rust** consumer: it writes the Go source (carried in the test —
+no `.go` file is committed) to the gitignored `pig-tmp/linkwatch/`,
+starts the link with the production `tasks_busy` wiring, runs `go run .`
+against it, then has the registry start a task and stop it. Expected
+stdout, in order: `SUBSCRIBED busy=false` (the ack snapshot),
+`EVENT busy=true`, `EVENT busy=false`, `EOF` (the link's shutdown closes
+the subscription), then exit 0 — a `TIMEOUT`/`ERROR` line or a non-zero
+exit fails it. Skips when `go` is not on `PATH`.
 
 `pig-sdk` resolution for plain cargo comes from the repository root's
 `.cargo/config.toml`, which carries a `[patch.crates-io]` to the staged SDK

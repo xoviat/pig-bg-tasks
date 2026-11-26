@@ -2,8 +2,9 @@
 
 **Status: §B is implemented and tested in this crate** (`src/link/` +
 `src/policy/inherit.rs`, 2026-11-20 — AF_UNIX on every platform including
-Windows, per the maintainer directive; 11 link + 3 policy-mirror tests
-green, full suite 115 unit + 14 smoke). Design decisions: **no new model
+Windows, per the maintainer directive; the task busy-state watch
+(`op:"watch-tasks"`) added 2026-11-25 — 17 link + 4 policy-mirror tests
+green, full suite 130 unit + 14 smoke + 1 Go-client test). Design decisions: **no new model
 tools** — a child's approval is put in front of the parent session's user
 through the parent session's *own* dialog, and **a child mirrors the
 parent's sandbox policy** (the parent is the baseline; a child's own
@@ -143,6 +144,27 @@ unknown mode or no mirror at all leaves the mirror untouched — and
 replies `{"applied":true|false}`, which is what the parent traces. The
 child's next tool call converges under the new level (mode *and* roots),
 so a grandchild inherits the change on the next hop of the same chain.
+
+**Task busy-state subscriptions (§B's third shape, 2026-11-25).** The
+same socket also serves `{"v":1,"op":"watch-tasks"}`: the reply acks with
+this session's current task state (`{"v":1,"ok":true,"busy":true|false}`
+— *busy* while any task in the registry runs, background **or**
+foreground) and the connection then **stays open**, carrying one
+`{"v":1,"event":"task-busy","busy":…}` frame per flip until the
+subscriber closes it or the link stops. Two states only, announced
+absolutely. The registry fires the flip itself — `new_running_job` and
+`mark_terminal` call `link::server::broadcast_busy()` — and the broadcast
+only hands the frame to a per-subscriber channel: the socket write runs
+on that subscriber's own thread (a 500 ms read probe catches a peer that
+vanished), so a watcher that stops reading can never stall a task's start
+or exit. The last pushed state is refreshed even while nobody watches (a
+late subscriber is acked the truth, not a stale idle), the set is capped
+at 32 per link, a dead subscriber is pruned, and `stop_with` drops every
+subscription — the peer sees the close. Verified end to end with a real
+**Go** client (`tests/go_watch.rs`: subscribe → task starts → task stops
+→ link shutdown → `EOF`, exit 0); the Go source is generated at run time
+into the gitignored `pig-tmp/linkwatch/` — **no `.go` file is committed**
+(maintainer directive).
 
 **Not implemented from this section:** the file-rendezvous fallback
 (atomic write + poll-for-reply + bounded wait next to the socket). Today

@@ -1,6 +1,6 @@
 {
   "name": "pig-bg-tasks",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "PiG background bash tasks (run_in_background, timeout auto-background, Ctrl+Shift+B, completion notifications) in Rust, with an mxc permission sandbox around every spawn",
   "keywords": [
     "pig-package",

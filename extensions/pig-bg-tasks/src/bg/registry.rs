@@ -179,19 +179,28 @@ impl Job {
     /// Flip to a final state ONCE (later marks are no-ops) and resolve the
     /// done broadcast. Returns true iff this call performed the flip.
     pub fn mark_terminal(&self, status: JobStatus, exit_code: Option<i32>) -> bool {
-        let mut st = glock(&self.state);
-        if st.status.terminal() {
-            return false;
+        {
+            let mut st = glock(&self.state);
+            if st.status.terminal() {
+                return false;
+            }
+            st.status = status;
+            st.exit_code = exit_code;
         }
-        st.status = status;
-        st.exit_code = exit_code;
-        drop(st);
-        let mut d = match self.done.lock() {
-            Ok(d) => d,
-            Err(p) => p.into_inner(),
-        };
-        *d = true;
-        self.done_cv.notify_all();
+        {
+            let mut d = match self.done.lock() {
+                Ok(d) => d,
+                Err(p) => p.into_inner(),
+            };
+            *d = true;
+            self.done_cv.notify_all();
+        }
+        // This task just stopped: this session may be idle now. The link's
+        // `watch-tasks` subscribers hear about it (a no-op without a link
+        // or a subscriber). Called with NO lock held — the busy-state read
+        // locks the registry, and no path may hold a job-state lock while
+        // waiting for the registry's (lock order: registry → job state).
+        crate::link::server::broadcast_busy();
         true
     }
 
@@ -361,7 +370,15 @@ impl Registry {
             done: Mutex::new(false),
             done_cv: Condvar::new(),
         });
-        self.lock().jobs.insert(id.to_string(), job.clone());
+        {
+            let mut g = self.lock();
+            g.jobs.insert(id.to_string(), job.clone());
+        }
+        // A task just started: this session may be busy now — the link's
+        // `watch-tasks` subscribers hear about it (a no-op without a link
+        // or a subscriber). The registry guard above is released first:
+        // the busy-state read takes one (lock order: registry → job state).
+        crate::link::server::broadcast_busy();
         job
     }
 

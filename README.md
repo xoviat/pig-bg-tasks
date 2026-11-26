@@ -166,8 +166,8 @@ the session that spawned it (pi-subagents' one provenance marker) — orients to
 AF_UNIX socket per session: `<osTempDir>/pig-sandbox-<sessionId>.sock` — the OS temp dir
 (`%TEMP%` / `$TMPDIR`), which both ends already agree on, so no config root has to be shared — on
 every platform (Windows binds a real winsock `AF_UNIX` socket through the `uds_windows` crate). That single socket transports
-everything that crosses the link: the policy fetch, the ask relay, and the parent's pushed policy
-updates. Both ends are this extension — and **no new model tools**: the child's approval is asked of
+everything that crosses the link: the policy fetch, the ask relay, the parent's pushed policy
+updates, and the child's subscription to the parent's **task busy state**. Both ends are this extension — and **no new model tools**: the child's approval is asked of
 the parent session's user through the parent session's own dialog.
 
 - **parent**: listens from `session_start` under its own **SDK** session id — a session may be a
@@ -182,6 +182,12 @@ the parent session's user through the parent session's own dialog.
   directions — a frame from any other session is refused, so only the session that spawned the
   child can move it. An unreachable parent leaves the local policy untouched: a child never
   *widens* by being unreachable;
+- **task busy-state watch**: `op:"watch-tasks"` subscribes on that same socket — the ack snapshots
+  the parent's current state (`busy` while any of its tasks runs, background or foreground) and
+  every flip afterwards arrives as a `{"event":"task-busy","busy":true|false}` frame on the open
+  connection until the subscriber closes it or the link goes down. A non-Rust consumer is
+  verified too (`tests/go_watch.rs` runs a generated Go client against it — the Go source is
+  written to the gitignored `pig-tmp/linkwatch/` at run time, never committed);
 - **ask relay**: a headless escalation kicks the ask up instead of failing — the child blocks
   (≤ 300 s) while the **parent session's user answers the standard Deny-first dialog**, worded
   exactly like a local escalation (same title builder), so it reads as if it originated there. A

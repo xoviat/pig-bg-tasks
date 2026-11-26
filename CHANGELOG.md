@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.5] - 2026-11-25
+
+- **Task busy-state notifications over the parent link** (`op:"watch-tasks"`): the single
+  `<osTempDir>/pig-sandbox-<id>.sock` now carries a third shape — a **subscription**. The reply
+  acks with this session's current state (`{"v":1,"ok":true,"busy":true|false}` — *busy* while
+  any task in the registry runs, background **or** foreground; *not busy* when none does), and the
+  connection then stays open, carrying one `{"v":1,"event":"task-busy","busy":…}` frame per flip
+  until the subscriber closes it or the link stops. Two states only, announced absolutely, so a
+  duplicate frame is harmless. Mechanism: `ServerOpts` gained a live `tasks_busy` closure (wired at
+  `session_start` to `Registry::shared()`), `bg::registry` fires `link::server::broadcast_busy()`
+  from `new_running_job` (task started) and `mark_terminal` (the first-wins guard means one call
+  per transition), and the broadcast only hands the frame to a per-subscriber channel — the socket
+  write runs on that subscriber's own thread (500 ms read probe for liveness), so a watcher that
+  stops reading can never stall a task's start or exit. `last` is refreshed even while nobody
+  watches, so a late subscriber is acked the truth instead of a stale idle; the set is capped at 32
+  per link, a dead subscriber fails its channel send and is pruned, and `stop_with` drops every
+  subscription (the peer sees the close). Child side: `link::client::watch_tasks` returns a `Watch`
+  (`busy()` snapshot, `recv(timeout)` → `Frame` / `Timeout` / `Closed`).
+- **Verified with a real Go client** (`tests/go_watch.rs`, 1 test): the Rust link server accepts a
+  generated Go program's `watch-tasks` subscription over its AF_UNIX socket, the registry then
+  starts a task (`EVENT busy=true`) and stops that same task (`EVENT busy=false`), and the link's
+  shutdown closes the connection (the Go side prints `EOF` and exits 0). The Go source rides inside
+  the test and is written to the gitignored `pig-tmp/linkwatch/` at run time — **no `.go` file is
+  committed** (maintainer directive); the test skips when `go` is not installed.
+- Tests: +3 unit (`watchers_see_busy_and_not_busy` — ack snapshot, both flip directions, the
+  quiet-not-dead gap, an unwatched flip still told to a late subscriber, stop closing the
+  subscription; `registry_start_and_exit_flip_the_watched_state` — the production registry path
+  with no explicit broadcast in the test; `watcher_cap_refuses_beyond_the_limit`) +1 integration
+  (`go_client_receives_busy_notifications`) — 130 unit + 14 smoke + 1 Go green, `cargo check
+  --all-targets` and the `x86_64-unknown-linux-gnu` cross check clean.
+
 ## [0.3.4] - 2026-11-25
 
 - **Hung-task notification**: a command that was *not* launched with `run_in_background` but was

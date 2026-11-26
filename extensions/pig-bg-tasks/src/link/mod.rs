@@ -14,7 +14,11 @@
 //!   which this session's user answers through this session's own dialog).
 //!   One socket transports *everything*: when this session's permission
 //!   level widens or narrows, the same endpoint pushes the new level out
-//!   as `op:"policy-update"` to every child that fetched a policy.
+//!   as `op:"policy-update"` to every child that fetched a policy, and
+//!   `op:"watch-tasks"` subscribes a child to this session's **task busy
+//!   state** — the ack snapshots it (`busy` = a task is running) and every
+//!   later flip arrives as a `task-busy` event on that same connection
+//!   while the link runs.
 //! - **Child side** ([`client`]): the presence of `PIG_PARENT_SESSION` in
 //!   the environment is what *makes* a session a child — it names the
 //!   immediate parent's session and therefore the endpoint to dial. A
@@ -30,8 +34,11 @@
 //! from knowledge they already share (no config root to agree on).
 //!
 //! Wire: one JSON object per line, versioned by `v`.
-//! Requests are `{"v":1,"op":"policy"|"ask"|"policy-update", …}`; replies are
-//! `{"v":1,"ok":true, …}` or `{"v":1,"ok":false,"error":"…"}`.
+//! Requests are `{"v":1,"op":"policy"|"ask"|"policy-update"|"watch-tasks", …}`;
+//! replies are `{"v":1,"ok":true, …}` or `{"v":1,"ok":false,"error":"…"}`.
+//! A `watch-tasks` reply is followed by zero or more unsolicited event
+//! frames (`{"v":1,"event":"task-busy","busy":true|false}`) on that same
+//! connection — the only frames the server sends without being asked.
 
 pub mod client;
 pub mod server;
@@ -118,9 +125,11 @@ pub fn socket_dir() -> PathBuf {
 
 /// The single agreed endpoint: `<socketDir>/pig-sandbox-<id>.sock`. One
 /// socket per session transports everything that crosses the link — the
-/// child's `policy` fetch, the `ask` relay, and the parent's
-/// `policy-update` when its permission level changes. Both ends derive it
-/// from the session id; the location is agreed on, never passed.
+/// child's `policy` fetch, the `ask` relay, the parent's
+/// `policy-update` when its permission level changes, and the child's
+/// `watch-tasks` subscription to this session's task busy state. Both
+/// ends derive it from the session id; the location is agreed on, never
+/// passed.
 pub fn endpoint(session_id: &str) -> PathBuf {
     socket_dir().join(format!("pig-sandbox-{}.sock", safe_id(session_id)))
 }

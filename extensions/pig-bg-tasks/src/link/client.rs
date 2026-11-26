@@ -184,6 +184,128 @@ pub fn push_policy(
     )
 }
 
+/// What a [`Watch`] read produced: an event frame, a deadline with
+/// nothing pending, or a link that went away.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// One frame from the peer (a `task-busy` flip).
+    Frame(Value),
+    /// The deadline passed with no event — the subscription is healthy.
+    Timeout,
+    /// The connection closed, broke, or carried something that is not one
+    /// JSON object per line (fail-closed: the caller re-subscribes).
+    Closed,
+}
+
+/// A live `watch-tasks` subscription: the ack's snapshot plus the event
+/// frames that follow it on this one connection.
+pub struct Watch {
+    stream: Stream,
+    busy: bool,
+}
+
+/// The stream is not `Debug`; the subscription's observable state is.
+impl std::fmt::Debug for Watch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Watch").field("busy", &self.busy).finish()
+    }
+}
+
+impl Watch {
+    /// The busy state the ack snapshot reported — the link's newest known
+    /// state at subscribe time.
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Wait up to `timeout` for the next event frame.
+    pub fn recv(&mut self, timeout: Duration) -> Event {
+        if self.stream.set_read_timeout(Some(timeout)).is_err() {
+            return Event::Closed;
+        }
+        match read_line(&mut self.stream) {
+            Ok(line) => match serde_json::from_str::<Value>(&line) {
+                Ok(v) => Event::Frame(v),
+                Err(_) => Event::Closed,
+            },
+            Err(e) if is_timeout(&e) => Event::Timeout,
+            Err(_) => Event::Closed,
+        }
+    }
+}
+
+/// Subscribe to `session_id`'s task busy-state notifications: the reply
+/// ack carries the current state (`busy` — a task is running — or not),
+/// then one `task-busy` event frame per flip arrives on this same
+/// connection until the subscriber drops it or the link stops. `Err` = no
+/// listener / refusal (fail-closed, like every other op).
+pub fn watch_tasks(session_id: &str) -> Result<Watch, String> {
+    let ep = crate::link::endpoint(session_id);
+    if !crate::link::fits(&ep) {
+        return Err(format!(
+            "endpoint for parent session {session_id} does not fit this platform's socket path limit"
+        ));
+    }
+    let payload = json!({"v": PROTOCOL_VERSION, "op": "watch-tasks"});
+    let mut last = String::new();
+    for round in 0..5u32 {
+        if round > 0 {
+            std::thread::sleep(DIAL_INTERVAL);
+        }
+        let mut stream = match Stream::connect(&ep) {
+            Ok(s) => s,
+            Err(e) => {
+                last = format!("{}: {e}", ep.display());
+                continue;
+            }
+        };
+        if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(10))) {
+            last = format!("{}: timeout setup failed: {e}", ep.display());
+            continue;
+        }
+        if let Err(e) = write_line(&mut stream, &payload.to_string()) {
+            last = format!("{}: write failed: {e}", ep.display());
+            continue;
+        }
+        let line = match read_line(&mut stream) {
+            Ok(l) => l,
+            Err(e) if is_timeout(&e) => {
+                return Err(format!(
+                    "timed out after 10s waiting for a watch ack from parent session {session_id}"
+                ));
+            }
+            Err(e) => {
+                last = format!("{}: read failed: {e}", ep.display());
+                continue;
+            }
+        };
+        let reply: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(format!(
+                    "malformed watch ack from parent session {session_id} (expected one JSON object)"
+                ));
+            }
+        };
+        if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(
+                reply
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the peer refused the request")
+                    .to_string(),
+            );
+        }
+        let busy = reply.get("busy").and_then(Value::as_bool).ok_or_else(|| {
+            format!("malformed watch ack from parent session {session_id} (no busy state)")
+        })?;
+        return Ok(Watch { stream, busy });
+    }
+    Err(format!(
+        "no pig-bg-tasks listener reachable for parent session {session_id} ({last})"
+    ))
+}
+
 /// Kick one escalation approval up to the parent and block for its answer
 /// (up to [`ASK_TIMEOUT`]).
 pub fn ask(parent_session: &str, ask: &Ask) -> Result<AskOutcome, String> {

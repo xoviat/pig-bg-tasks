@@ -12,9 +12,18 @@
 //! session's current policy to every child that has fetched one whenever
 //! its permission level widens or narrows (`op:"policy-update"`), so a
 //! child never keeps a level the parent has already moved off.
+//!
+//! And a third shape — a **subscription**: `op:"watch-tasks"` keeps the
+//! child's connection open after its ack, and that one connection carries
+//! this session's task busy state (`busy` = a task is running, `!busy` =
+//! nothing is). The ack snapshots the state; every later flip arrives as
+//! a `{"event":"task-busy","busy":…}` frame, pushed by [`broadcast_busy`],
+//! which [`crate::bg::registry`] fires when a task starts or stops. Two
+//! states only, announced absolutely — a duplicate frame is harmless.
 
+use std::io::Read;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -47,6 +56,11 @@ pub struct ServerOpts {
     pub approver: Option<Approver>,
     /// Apply a parent's pushed policy, if this session mirrors one.
     pub on_policy_update: Option<PolicyApplier>,
+    /// Whether this session currently has tasks running — the state an
+    /// `op:"watch-tasks"` subscriber is snapshot in its ack and pushed on
+    /// every flip. Read live, like [`ServerOpts::policy`]: the registry
+    /// behind it is the source of truth for "busy".
+    pub tasks_busy: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 struct Running {
@@ -91,6 +105,40 @@ pub fn children() -> Vec<String> {
 }
 
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+/// One accepted `watch-tasks` subscription. Events reach the subscriber's
+/// own connection through this channel, so [`broadcast_busy`] only ever
+/// hands a frame to a channel — a watcher that stopped reading can never
+/// stall a task start or a task exit (its own thread owns the socket
+/// write, bounded by the write timeout).
+struct Subscriber {
+    id: u64,
+    tx: mpsc::Sender<Value>,
+}
+
+/// The subscription registry: who watches this link, plus the last busy
+/// state pushed. `last` makes a *flip* the only thing that earns a frame
+/// (the frames are absolute `{"busy": …}` announcements, so a duplicate
+/// would be harmless — this just avoids the chatter).
+struct WatchState {
+    last: Option<bool>,
+    subs: Vec<Subscriber>,
+}
+
+static WATCH: Mutex<WatchState> = Mutex::new(WatchState {
+    last: None,
+    subs: Vec::new(),
+});
+static NEXT_WATCHER: AtomicU64 = AtomicU64::new(1);
+
+/// One link's subscription cap: a watcher costs a thread and a socket, and
+/// nothing in §B legitimately brings more than a handful of children to
+/// one session's link.
+const MAX_WATCHERS: usize = 32;
+
+/// How often an open subscription checks whether its peer is still there
+/// (read probe) when no event is pending.
+const WATCH_PROBE_INTERVAL: Duration = Duration::from_millis(500);
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -189,7 +237,22 @@ pub fn stop() {
 pub fn stop_with(reason: &str) {
     let previous = lock(&RUNNING).take();
     lock(&CHILDREN).clear();
+    // Dropping the subscribers' senders wakes every `watch-tasks` thread,
+    // which then drops its connection — subscribers never outlive the link.
+    let watchers = {
+        let mut w = lock(&WATCH);
+        let n = w.subs.len();
+        w.last = None;
+        w.subs.clear();
+        n
+    };
     let Some(running) = previous else { return };
+    if watchers > 0 {
+        crate::bg::dbg::trace(json!({
+            "phase": "link_watchers_dropped", "session": running.opts.session_id,
+            "watchers": watchers, "reason": reason
+        }));
+    }
     let session = running.opts.session_id.clone();
     let paths: Vec<String> = running
         .paths
@@ -271,6 +334,67 @@ pub fn broadcast_policy_now() -> usize {
     deliver_policy(&opts, &children)
 }
 
+/// Push this session's task busy state to every `watch-tasks` subscriber
+/// (`{"event":"task-busy","busy":…}` on each subscriber's own
+/// connection): busy = a task is running, not busy = nothing is. The task
+/// registry fires this when a task starts and when it stops, so a
+/// subscriber sees both directions.
+///
+/// No link ⇒ the call returns at once; with a link it always refreshes
+/// the remembered state (so a subscriber that arrives mid-task is told the
+/// truth) but only a *flip* earns a frame. No socket I/O on this path
+/// either way — the busy state is read **outside** every lock (the
+/// registry's hooks call this with no registry lock held, and the read
+/// takes one), and delivery is a channel hand-off, so the caller (a
+/// task's start or exit path) never waits on a peer.
+pub fn broadcast_busy() {
+    push_busy();
+}
+
+/// [`broadcast_busy`] on the calling thread, reporting how many
+/// subscribers the frame reached (tests / diagnostics).
+pub fn broadcast_busy_now() -> usize {
+    push_busy()
+}
+
+fn push_busy() -> usize {
+    // The link's live opts carry the busy-state closure; no link ⇒ no
+    // subscriber to tell (and `last` starts over with the next `start`).
+    let opts = {
+        let running = lock(&RUNNING);
+        match running.as_ref() {
+            Some(r) => r.opts.clone(),
+            None => return 0,
+        }
+    };
+    // Read the state even with nobody watching: it keeps `last` truthful,
+    // so a subscriber that arrives mid-task is told "busy" instead of a
+    // state that went stale while the set was empty.
+    let busy = (opts.tasks_busy)();
+    let mut w = lock(&WATCH);
+    if w.last == Some(busy) {
+        return 0; // no flip, no frame
+    }
+    w.last = Some(busy);
+    let frame = json!({"v": PROTOCOL_VERSION, "event": "task-busy", "busy": busy});
+    let mut delivered = 0usize;
+    // A subscriber whose thread is gone fails the send and is dropped.
+    w.subs.retain(|s| {
+        if s.tx.send(frame.clone()).is_ok() {
+            delivered += 1;
+            true
+        } else {
+            false
+        }
+    });
+    if delivered > 0 {
+        crate::bg::dbg::trace(json!({
+            "phase": "link_task_busy", "busy": busy, "watchers": delivered
+        }));
+    }
+    delivered
+}
+
 /// One push per child: the policy snapshot is read once (the same live
 /// closure `op:"policy"` answers with), then each child gets one short
 /// dial — a failure there is that child's problem, not the switch's.
@@ -319,6 +443,9 @@ fn accept_loop(listener: Listener, opts: Arc<ServerOpts>, stopped: Arc<AtomicBoo
 
 /// Serve exactly one request frame and reply (one connection per request —
 /// the child dials per call, so asks never serialize behind each other).
+/// The single exception is `watch-tasks`: its ack is followed by that
+/// subscriber's event frames on the *same* connection, so this thread
+/// stays with the stream until the peer or the link goes away.
 fn serve(mut stream: Stream, opts: Arc<ServerOpts>) {
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
@@ -326,11 +453,83 @@ fn serve(mut stream: Stream, opts: Arc<ServerOpts>) {
         Ok(l) => l,
         Err(_) => return,
     };
-    let reply = match serde_json::from_str::<Value>(&line) {
-        Ok(req) => dispatch(&req, &opts),
-        Err(_) => err("malformed frame (expected one JSON object per line)"),
+    let req = match serde_json::from_str::<Value>(&line) {
+        Ok(req) => req,
+        Err(_) => {
+            let reply = err("malformed frame (expected one JSON object per line)");
+            let _ = write_line(&mut stream, &reply.to_string());
+            return;
+        }
     };
-    let _ = write_line(&mut stream, &reply.to_string());
+    match dispatch(&req, &opts) {
+        Action::Reply(reply) => {
+            let _ = write_line(&mut stream, &reply.to_string());
+        }
+        Action::Watch { ack, watch } => {
+            // A failed ack write drops `watch`, which unregisters it.
+            if write_line(&mut stream, &ack.to_string()).is_ok() {
+                stream_events(stream, watch);
+            }
+        }
+    }
+}
+
+/// What serving one request amounts to: a one-line reply (every op but
+/// one), or the `watch-tasks` ack plus the subscription that then streams
+/// this session's busy-state flips on that same connection.
+enum Action {
+    Reply(Value),
+    Watch { ack: Value, watch: Watch },
+}
+
+/// One live `watch-tasks` subscription: dropping it unregisters the
+/// subscriber (the ack never went out, or [`stream_events`] ended).
+struct Watch {
+    id: u64,
+    rx: mpsc::Receiver<Value>,
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        lock(&WATCH).subs.retain(|s| s.id != self.id);
+    }
+}
+
+/// The subscription half: push event frames to this one subscriber until
+/// it goes away or the link stops. The short read timeout doubles as a
+/// liveness probe — a peer that vanished surfaces as EOF (or an error) on
+/// the next tick, so a dead watcher is dropped without waiting for the
+/// next state flip to discover it.
+fn stream_events(mut stream: Stream, watch: Watch) {
+    let _ = stream.set_read_timeout(Some(WATCH_PROBE_INTERVAL));
+    let mut probe = [0u8; 1];
+    let mut frames = 0usize;
+    loop {
+        match watch.rx.recv_timeout(WATCH_PROBE_INTERVAL) {
+            Ok(frame) => {
+                if write_line(&mut stream, &frame.to_string()).is_err() {
+                    break; // peer gone mid-write
+                }
+                frames += 1;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => match stream.read(&mut probe) {
+                Ok(0) => break, // peer closed the connection
+                Ok(_) => {}     // stray bytes — one request per connection, ignored
+                Err(e) if read_timed_out(&e) => {} // still alive, nothing pending
+                Err(_) => break,                   // broken connection
+            },
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // link stopped
+        }
+    }
+    drop(watch); // unregister (no-op when stop already cleared the set)
+    crate::bg::dbg::trace(json!({
+        "phase": "link_watch_ended", "frames": frames
+    }));
+}
+
+/// A read deadline (`SO_RCVTIMEO`) surfaces as `WouldBlock`/`TimedOut`.
+fn read_timed_out(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
 }
 
 fn ok(fields: Value) -> Value {
@@ -347,11 +546,13 @@ fn err(msg: &str) -> Value {
     json!({"v": PROTOCOL_VERSION, "ok": false, "error": msg})
 }
 
-fn dispatch(req: &Value, opts: &ServerOpts) -> Value {
+fn dispatch(req: &Value, opts: &ServerOpts) -> Action {
     let v = req.get("v").and_then(Value::as_u64).unwrap_or(0);
     if v != PROTOCOL_VERSION {
         crate::bg::dbg::trace(json!({"phase": "link_version_mismatch", "v": v}));
-        return err(&format!("unsupported link version {v} (expected {PROTOCOL_VERSION})"));
+        return Action::Reply(err(&format!(
+            "unsupported link version {v} (expected {PROTOCOL_VERSION})"
+        )));
     }
     let op = req.get("op").and_then(Value::as_str).unwrap_or("");
     // Positive evidence that THIS process served a request on its socket:
@@ -369,11 +570,57 @@ fn dispatch(req: &Value, opts: &ServerOpts) -> Value {
                 );
             }
             let policy = (opts.policy)();
-            ok(json!({"policy": policy.to_value()}))
+            Action::Reply(ok(json!({"policy": policy.to_value()})))
         }
-        "policy-update" => handle_policy_update(req, opts),
-        "ask" => handle_ask(req, opts),
-        other => err(&format!("unknown op \"{other}\"")),
+        "policy-update" => Action::Reply(handle_policy_update(req, opts)),
+        "ask" => Action::Reply(handle_ask(req, opts)),
+        "watch-tasks" => watch_tasks(opts),
+        other => Action::Reply(err(&format!("unknown op \"{other}\""))),
+    }
+}
+
+/// Accept a `watch-tasks` subscription: the ack carries this session's
+/// current busy state, and every later flip arrives as an event frame on
+/// this same connection until the peer closes it or the link stops.
+///
+/// The subscriber is registered *before* the snapshot is read, so a flip
+/// in that window is already queued behind the ack — and the ack always
+/// reports the newest state the link knows (`last`), which [`push_busy`]
+/// keeps truthful even while nobody watches.
+fn watch_tasks(opts: &ServerOpts) -> Action {
+    let id = NEXT_WATCHER.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx) = mpsc::channel();
+    let registered_last = {
+        let mut w = lock(&WATCH);
+        if w.subs.len() >= MAX_WATCHERS {
+            crate::bg::dbg::trace(json!({
+                "phase": "link_watch_refused", "why": "cap", "cap": MAX_WATCHERS
+            }));
+            return Action::Reply(err(&format!(
+                "this link already has {MAX_WATCHERS} task watchers"
+            )));
+        }
+        w.subs.push(Subscriber { id, tx });
+        w.last
+    };
+    // Read outside the lock — the busy-state closure takes the registry's.
+    let snapshot = (opts.tasks_busy)();
+    let busy = {
+        let w = lock(&WATCH);
+        if w.last != registered_last {
+            // A flip landed between the register and the snapshot: that
+            // frame is already queued for this subscriber — ack it.
+            w.last.unwrap_or(snapshot)
+        } else {
+            // Unchanged (or never pushed): the known state wins, and the
+            // snapshot only fills the very first subscriber's ack.
+            registered_last.unwrap_or(snapshot)
+        }
+    };
+    crate::bg::dbg::trace(json!({"phase": "link_watch_started", "busy": busy}));
+    Action::Watch {
+        ack: ok(json!({"busy": busy})),
+        watch: Watch { id, rx },
     }
 }
 
@@ -449,6 +696,7 @@ fn handle_ask(req: &Value, opts: &ServerOpts) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bg::registry::{JobStatus, Registry};
     use crate::link::{Ask, client};
 
     fn opts(session: &str) -> ServerOpts {
@@ -462,6 +710,23 @@ mod tests {
             }),
             approver: None,
             on_policy_update: None,
+            // Overridden by the tests that watch; the default is "idle".
+            tasks_busy: Arc::new(|| false),
+        }
+    }
+
+    /// Wait for the next `task-busy` event and return its `busy` value.
+    fn busy_event(w: &mut client::Watch) -> bool {
+        match w.recv(Duration::from_secs(5)) {
+            client::Event::Frame(v) => {
+                assert_eq!(
+                    v.get("event").and_then(Value::as_str),
+                    Some("task-busy"),
+                    "{v}"
+                );
+                v.get("busy").and_then(Value::as_bool).expect("busy field")
+            }
+            other => panic!("expected a task-busy event, got {other:?}"),
         }
     }
 
@@ -730,6 +995,7 @@ mod tests {
             on_policy_update: Some(Arc::new(move |sender, p| {
                 tx.send((sender.to_string(), p)).is_ok()
             })),
+            tasks_busy: Arc::new(|| false),
         });
         let child_path = link::endpoint("child-1");
         let child_listener = Listener::bind(&child_path).expect("child socket");
@@ -792,6 +1058,116 @@ mod tests {
         // Wake the child's accept loop so its thread drops the listener
         // (and the socket file with it), whatever the counts above were.
         let _ = link::Stream::connect(&child_path);
+    }
+
+    /// `watch-tasks` over the socket: the ack snapshots the current busy
+    /// state, every later flip arrives as a `task-busy` event on that same
+    /// connection (both directions), silence means "no flip" rather than a
+    /// dead link, a flip made while nobody watched is still told to a late
+    /// subscriber, and stopping the link closes the subscription.
+    #[test]
+    fn watchers_see_busy_and_not_busy() {
+        let _t = crate::link::test_mu::lock();
+        let busy = Arc::new(AtomicBool::new(false));
+        let mut o = opts("sess-watch");
+        {
+            let b = busy.clone();
+            o.tasks_busy = Arc::new(move || b.load(Ordering::SeqCst));
+        }
+        start(o);
+
+        // (a) subscribe: the ack carries the current state
+        let mut w = client::watch_tasks("sess-watch").expect("subscribe");
+        assert!(!w.busy(), "the ack snapshots an idle link");
+
+        // (b) busy → the flip reaches the open connection
+        busy.store(true, Ordering::SeqCst);
+        assert_eq!(broadcast_busy_now(), 1, "one watcher, one frame");
+        assert!(busy_event(&mut w), "a running task reads as busy");
+
+        // (c) and back → not busy
+        busy.store(false, Ordering::SeqCst);
+        assert_eq!(broadcast_busy_now(), 1, "the flip back lands too");
+        assert!(!busy_event(&mut w), "nothing running reads as not busy");
+
+        // (d) no flip ⇒ no frame: quiet, not dead
+        assert_eq!(broadcast_busy_now(), 0, "same state, no frame");
+        assert_eq!(w.recv(Duration::from_millis(300)), client::Event::Timeout);
+
+        // (e) the state stays truthful with NO watcher attached: a flip
+        //     into an empty set is remembered, so a late subscriber is
+        //     told the truth instead of a stale idle
+        stop();
+        drop(w); // its connection died with the link (see (f))
+        start({
+            let mut o2 = opts("sess-watch");
+            let b = busy.clone();
+            o2.tasks_busy = Arc::new(move || b.load(Ordering::SeqCst));
+            o2
+        });
+        busy.store(true, Ordering::SeqCst);
+        assert_eq!(broadcast_busy_now(), 0, "nobody is watching yet");
+        let mut w3 = client::watch_tasks("sess-watch").expect("late subscribe");
+        assert!(w3.busy(), "the ack carries the flip that happened unwatched");
+
+        // (f) a stopped link ends the subscription (the peer sees the close)
+        stop();
+        assert_eq!(w3.recv(Duration::from_secs(2)), client::Event::Closed);
+    }
+
+    /// The task registry is what flips a watcher's state — the production
+    /// path end to end: a task starting ⇒ busy, the same task stopping ⇒
+    /// not busy, with no explicit broadcast anywhere in the test.
+    #[test]
+    fn registry_start_and_exit_flip_the_watched_state() {
+        let _t = crate::link::test_mu::lock();
+        let reg = Registry::new();
+        let mut o = opts("sess-watch-reg");
+        {
+            let live = reg.clone();
+            o.tasks_busy = Arc::new(move || {
+                let (running, _, _) = live.snapshot();
+                !running.is_empty()
+            });
+        }
+        start(o);
+
+        let mut w = client::watch_tasks("sess-watch-reg").expect("subscribe");
+        assert!(!w.busy(), "nothing is running yet");
+
+        let job = reg.new_running_job(
+            "bash-w1",
+            "sleep 1",
+            None,
+            "/tmp/w1.log",
+            "tc",
+            "",
+            true,
+        );
+        assert!(busy_event(&mut w), "a started task flips the link to busy");
+
+        job.mark_terminal(JobStatus::Completed, Some(0));
+        assert!(!busy_event(&mut w), "the stopped task flips it back");
+
+        // Still quiet afterwards — the flip already landed.
+        assert_eq!(w.recv(Duration::from_millis(300)), client::Event::Timeout);
+        stop();
+    }
+
+    /// The subscription cap refuses one watcher too many instead of
+    /// leaking a thread and a socket per connection without bound.
+    #[test]
+    fn watcher_cap_refuses_beyond_the_limit() {
+        let _t = crate::link::test_mu::lock();
+        start(opts("sess-cap"));
+        let mut held = Vec::new();
+        for _ in 0..MAX_WATCHERS {
+            held.push(client::watch_tasks("sess-cap").expect("subscribe within the cap"));
+        }
+        let e = client::watch_tasks("sess-cap").unwrap_err();
+        assert!(e.contains("task watchers"), "{e}");
+        drop(held);
+        stop();
     }
 
     /// A session that mirrors no parent refuses `policy-update`, and a
