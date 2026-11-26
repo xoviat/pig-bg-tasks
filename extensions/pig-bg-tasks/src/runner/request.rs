@@ -17,6 +17,13 @@ use mxc_sdk::v1::{
 /// brush has no built-in sed. Cached per process, like the configured shell.
 static USERLAND: Mutex<String> = Mutex::new(String::new());
 
+/// The agent `bin` dir (the extension API's `get_agent_dir()` + `/bin`),
+/// prepended ahead of the userland applets in both confined and bare
+/// spawns. It holds PiG's downloaded helpers (`rg`, `fd`), which the host
+/// PATH does not carry, so shell commands resolve them. Cached per
+/// process, like the configured shell.
+static HELPERS: Mutex<String> = Mutex::new(String::new());
+
 fn g<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -31,6 +38,16 @@ pub fn userland_dir() -> String {
     g(&USERLAND).clone()
 }
 
+/// Record the agent `bin` dir ("" = none) — called from session_start.
+pub fn set_helpers_dir(p: &str) {
+    *g(&HELPERS) = p.to_string();
+}
+
+/// The configured agent `bin` dir ("" = none).
+pub fn helpers_dir() -> String {
+    g(&HELPERS).clone()
+}
+
 /// `PATH` separator for this platform: `;` on Windows, `:` on POSIX.
 pub const PATH_SEP: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -41,6 +58,21 @@ fn prepend_path(userland: &str, path_val: &str) -> String {
     } else {
         format!("{userland}{PATH_SEP}{path_val}")
     }
+}
+
+/// The PATH a spawn gets over `base`: agent `bin` helpers first, then the
+/// userland applets, then `base` — each empty dir drops out. Used by both
+/// spawn paths so confined and bare children resolve helpers identically.
+fn child_path(base: &str) -> String {
+    let mut p = base.to_string();
+    // prepend order is reversed: userland lands directly over `base`, the
+    // helpers ahead of it — final order helpers;userland;base
+    for dir in [userland_dir(), helpers_dir()] {
+        if !dir.is_empty() {
+            p = prepend_path(&dir, &p);
+        }
+    }
+    p
 }
 
 /// Operational rule (memo E4/E5): broad read of the system root — `C:\` on
@@ -101,20 +133,20 @@ pub fn build_request(
         .collect();
     env.push(("LC_ALL".to_string(), String::new()));
     env.push(("LC_MESSAGES".to_string(), "C".to_string()));
-    // Userland first on PATH (resolve order: applets, then inherited host).
-    // An env_extra PATH (callers today pass none) stays the base — userland
-    // prepends to it instead of being replaced.
-    let userland = userland_dir();
-    if !userland.is_empty() {
+    // Agent helpers + userland applets first on PATH (resolve order:
+    // `<agentDir>/bin`, applets, then inherited host). An env_extra PATH
+    // (callers today pass none) stays the base — child_path prepends to it
+    // instead of being replaced.
+    if !userland_dir().is_empty() || !helpers_dir().is_empty() {
         let idx = env.iter().position(|(k, _)| k.eq_ignore_ascii_case("PATH"));
         match idx {
             Some(i) => {
                 let base = env[i].1.clone();
-                env[i].1 = prepend_path(&userland, &base);
+                env[i].1 = child_path(&base);
             }
             None => {
                 let host = std::env::var("PATH").unwrap_or_default();
-                env.push(("PATH".to_string(), prepend_path(&userland, &host)));
+                env.push(("PATH".to_string(), child_path(&host)));
             }
         }
     }
@@ -242,16 +274,16 @@ pub fn bare_env(extra: &[(String, String)]) -> Vec<(String, String)> {
     }
     out.retain(|(k, _)| !k.eq_ignore_ascii_case("lc_messages"));
     out.push(("LC_MESSAGES".to_string(), "C".to_string()));
-    // Same prepend as the confined path: applets before the inherited PATH.
-    let userland = userland_dir();
-    if !userland.is_empty() {
+    // Same prepend as the confined path: agent helpers and applets before
+    // the inherited PATH.
+    if !userland_dir().is_empty() || !helpers_dir().is_empty() {
         let idx = out.iter().position(|(k, _)| k.eq_ignore_ascii_case("PATH"));
         match idx {
             Some(i) => {
                 let base = out[i].1.clone();
-                out[i].1 = prepend_path(&userland, &base);
+                out[i].1 = child_path(&base);
             }
-            None => out.push(("PATH".to_string(), userland)),
+            None => out.push(("PATH".to_string(), child_path(""))),
         }
     }
     out
@@ -427,5 +459,59 @@ mod tests {
             .1
             .clone();
         assert!(!pc.starts_with(&format!("C:\\ubin{PATH_SEP}")), "{pc}");
+    }
+
+    /// The agent `bin` dir (extension API `get_agent_dir()` + `/bin`) leads
+    /// the child PATH in BOTH spawn paths, ahead of the userland applets,
+    /// and resets to nothing like the userland seam does.
+    #[test]
+    fn agent_bin_prepends_to_child_path() {
+        let _t = TEST_MU.lock().unwrap_or_else(|e| e.into_inner());
+        set_userland_dir(r"C:\ubin");
+        set_helpers_dir(r"C:\agent\bin");
+        let host = std::env::var("PATH").unwrap_or_default();
+
+        // confined: helpers;userland;host
+        let req = build_request(
+            &args(&["brush.exe", "-c", "x"]),
+            "C:\\ws",
+            &[],
+            &[r"C:\ws".into()],
+        );
+        let env = req.environment.expect("env");
+        let path = env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .expect("PATH");
+        assert_eq!(
+            path.1,
+            format!("C:\\agent\\bin{PATH_SEP}C:\\ubin{PATH_SEP}{host}")
+        );
+
+        // bare: same order, exactly one PATH key
+        let envb = bare_env(&[]);
+        let paths: Vec<_> = envb
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("path"))
+            .collect();
+        assert_eq!(paths.len(), 1);
+        assert!(
+            paths[0]
+                .1
+                .starts_with(&format!("C:\\agent\\bin{PATH_SEP}C:\\ubin{PATH_SEP}")),
+            "{}",
+            paths[0].1
+        );
+
+        // reset: no residue
+        set_userland_dir("");
+        set_helpers_dir("");
+        let pc = bare_env(&[])
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("path"))
+            .unwrap()
+            .1
+            .clone();
+        assert!(!pc.starts_with(&format!("C:\\agent\\bin{PATH_SEP}")), "{pc}");
     }
 }

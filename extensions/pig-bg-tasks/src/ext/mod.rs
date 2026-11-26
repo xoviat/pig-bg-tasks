@@ -144,6 +144,16 @@ pub fn build() -> Extension {
             p.is_dir().then(|| p.to_string_lossy().into_owned())
         });
         crate::runner::request::set_userland_dir(userland.as_deref().unwrap_or(""));
+        // Agent helpers on the child PATH: `<agentDir>/bin` from the
+        // extension API (host_info `agentDir`) holds PiG's downloaded
+        // `rg`/`fd`, which the host PATH does not carry — prepended in both
+        // spawn paths so shell commands resolve them. No existence gate:
+        // helpers download lazily, after session start.
+        let helpers = pig_sdk::get_agent_dir()
+            .ok()
+            .map(|d| std::path::Path::new(&d).join("bin").to_string_lossy().into_owned())
+            .unwrap_or_default();
+        crate::runner::request::set_helpers_dir(&helpers);
         // ── The parent link (DELEGATED-WORKSPACES §B) ────────────────
         // This session is a CHILD when PIG_PARENT_SESSION names its parent
         // (the subprocess plugin's one marker) and a PARENT for its own SDK

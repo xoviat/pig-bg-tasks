@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.6] - 2026-11-26
+
+- **Agent `bin` helpers on the bash PATH**: every spawn (confined *and* bare) now prepends
+  `<agentDir>/bin` to the child `PATH`, ahead of the userland applets — `<agentDir>` comes from the
+  extension API (`pig_sdk::get_agent_dir()`, the host's `agentDir`), not a hand-rolled config-home
+  guess. That directory holds PiG's downloaded helpers (`rg.exe`, `fd.exe`), which the host PATH does
+  not carry, so shell commands used to fail with `rg: command not found` even though the helpers were
+  installed. Mechanism: `runner::request` gained a `HELPERS` seam beside `USERLAND` (`set_helpers_dir`
+  / `helpers_dir`, set at `session_start` next to the userland seam) and one `child_path(base)` that
+  both spawn paths share — final order `<agentDir>/bin`, userland applets, inherited host PATH; an
+  `env_extra` PATH stays the base it prepends to. No existence gate: helpers download lazily, after
+  session start, so a dead PATH entry is preferred over a missing one.
+- Tests: +1 unit (`agent_bin_prepends_to_child_path` — helpers ahead of applets in the confined
+  request *and* in `bare_env`, exactly one PATH key, clean reset) — 131 unit green, `cargo check
+  --all-targets` clean.
+
 ## [0.3.5] - 2026-11-25
 
 - **Task busy-state notifications over the parent link** (`op:"watch-tasks"`): the single
